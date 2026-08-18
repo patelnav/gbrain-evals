@@ -1,0 +1,67 @@
+{
+  "version": "0.0.10",
+  "generated_by": "benchrouter.setup_packet.v1",
+  "product": {
+    "slug": "gbrain-evals",
+    "default_branch": "main",
+    "repo_full_name": "patelnav/gbrain-evals"
+  },
+  "files": [
+    {
+      "path": ".benchrouter/benchrouter.yml",
+      "sha256": "a79de8f6487f91b8d69e42a89231517747f8548523d49041abe37f1e1b372d6a"
+    },
+    {
+      "path": ".env.example",
+      "sha256": "64cd688ac81adcf5cb2ffbc730314f7fb6d3fd2541b5b198ce9fe5ac4988896b"
+    },
+    {
+      "path": ".benchrouter/README.md",
+      "sha256": "bbba6b6c7e0e4ea005e8957e32b9dcdba8989fcfcd6b60ee5a610c65e349c053"
+    },
+    {
+      "path": ".benchrouter/SETUP_README.md",
+      "sha256": "50883e9563b969d9834479b52a3c41828bcb2d4d196d9f50f3ce8f38a59f0759"
+    },
+    {
+      "path": ".benchrouter/.gitignore",
+      "sha256": "90cb99e3486f414deb00c11f8bd62c6c5cd9570ff7f60a678bbd3db6f6b50385"
+    },
+    {
+      "path": ".github/workflows/benchrouter-evals.yml",
+      "sha256": "ddcf3adac5dbc2dd20a8d3420f1b88108c542b153e8abfb58633f69616faf8be"
+    },
+    {
+      "path": ".benchrouter/benchrouter-eval.mjs",
+      "sha256": "a088514d07b203227a1da2fbcbb89a46bb5b796d35dad0084f3a59695fc7b3df"
+    },
+    {
+      "path": ".benchrouter/benchrouter-calibrate.mjs",
+      "sha256": "19dcc4d627a067e6d847829f247b9c38d2d909367684c4d901c235184bbae1bf"
+    },
+    {
+      "path": ".benchrouter/upload-results.mjs",
+      "sha256": "6b4c7fc9a9a411d012cdc911473f62a51134445551505a1d0fbd915ed7fac32d"
+    },
+    {
+      "path": ".benchrouter/sidecar.mjs",
+      "sha256": "60e241fdd6e1c0cf544b0901fefc31fcedfc1fee1dcf60a429e0060b9190957c"
+    },
+    {
+      "path": ".benchrouter/cases.contextual-synopsis.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "path": ".benchrouter/cases.contextual-synopsis.README.md",
+      "sha256": "95c119a0665af030f3158f54780f12ceaea53eded07da091a2ebea9c4c266f32"
+    },
+    {
+      "path": ".benchrouter/scorer.contextual-synopsis.js",
+      "sha256": "2d2beefa00d308cb27b16c1c1fef3abd5f7f39286c814e63d36e5d17ee585cbf"
+    },
+    {
+      "path": ".benchrouter/calibration.contextual-synopsis.json",
+      "sha256": "4137c1180422629630a99b9d6e6337e7f84efdfb17c5371f6efb69dd1ca8bc38"
+    }
+  ]
+}

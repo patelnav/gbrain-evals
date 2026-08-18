@@ -1,0 +1,73 @@
+{
+  "archetype": "human-read",
+  "fixtures": [
+    {
+      "id": "valid-paraphrase",
+      "expect": "pass",
+      "output": "Erin Yu led Acme AI’s $30M Series A for Fund X in March 2026, supporting the company’s autonomous-picking inference platform expansion.",
+      "request": {
+        "page_title": "Acme AI",
+        "full_document": "Acme AI builds an autonomous-picking inference platform and raised a $30M Series A in March 2026 led by Erin Yu.",
+        "chunk": "The $30M Series A was led by Fund X partner Erin Yu in March 2026.",
+        "required_exact_terms": ["Acme AI", "Erin Yu"],
+        "retrieval_queries": ["who led Acme AI's Series A"]
+      },
+      "judge_reply": "PASS"
+    },
+    {
+      "id": "empty-output",
+      "expect": "fail",
+      "output": "",
+      "request": { "required_exact_terms": ["Acme AI"] },
+      "judge_reply": "FAIL: empty"
+    },
+    {
+      "id": "too-short",
+      "expect": "fail",
+      "output": "Erin Yu led Acme AI’s round.",
+      "request": { "required_exact_terms": ["Acme AI", "Erin Yu"] },
+      "judge_reply": "PASS"
+    },
+    {
+      "id": "multiple-sentences",
+      "expect": "fail",
+      "output": "Erin Yu led Acme AI’s Series A in March 2026. Fund X supplied the capital for its autonomous-picking inference platform.",
+      "request": { "required_exact_terms": ["Acme AI", "Erin Yu"] },
+      "judge_reply": "PASS"
+    },
+    {
+      "id": "missing-entity-anchor",
+      "expect": "fail",
+      "output": "The investor led the company’s $30M Series A in March 2026 to expand its autonomous-picking inference platform across warehouse customers.",
+      "request": { "required_exact_terms": ["Acme AI", "Erin Yu"] },
+      "judge_reply": "PASS"
+    },
+    {
+      "id": "generic-preamble",
+      "expect": "fail",
+      "output": "This chunk describes how Erin Yu led Acme AI’s $30M Series A during March 2026 for its autonomous-picking inference platform expansion.",
+      "request": { "required_exact_terms": ["Acme AI", "Erin Yu"] },
+      "judge_reply": "PASS"
+    },
+    {
+      "id": "markdown-output",
+      "expect": "fail",
+      "output": "**Erin Yu** led Acme AI’s $30M Series A in March 2026 to finance expansion of the company’s autonomous-picking inference platform.",
+      "request": { "required_exact_terms": ["Acme AI", "Erin Yu"] },
+      "judge_reply": "PASS"
+    },
+    {
+      "id": "plausible-hallucination",
+      "expect": "fail",
+      "output": "Erin Yu led Acme AI’s $50M Series B in April 2026 to acquire Foundry Labs and consolidate autonomous-picking inference infrastructure.",
+      "request": {
+        "page_title": "Acme AI",
+        "full_document": "Acme AI raised a $30M Series A in March 2026 led by Erin Yu.",
+        "chunk": "The $30M Series A was led by Erin Yu in March 2026.",
+        "required_exact_terms": ["Acme AI", "Erin Yu"],
+        "retrieval_queries": ["who led Acme AI's Series A"]
+      },
+      "judge_reply": "FAIL: the candidate invents a Series B, acquisition, amount, and date"
+    }
+  ]
+}

@@ -1,0 +1,195 @@
+[
+  {
+    "id": "series-a-lead-and-date",
+    "route": "gbrain-evals/contextual-synopsis",
+    "critical": true,
+    "mode": "isolated",
+    "input": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You generate one-sentence chunk synopses for a personal knowledge brain.\n\nGiven a document (the FULL_DOCUMENT block) and a chunk from it (the CHUNK\nblock), write a single concise sentence that orients the chunk within the\ndocument. Name the entities, time, and topic that the chunk is about,\nusing terms that would appear in user queries.\n\nRules:\n- One sentence, 15-30 words.\n- No preamble like \"This chunk is about\" — just write the synopsis.\n- Use the exact entity names from the document, not generic terms.\n- If the chunk is structural (heading, code block, list of links), say so.\n- Plain text only. No markdown, no quotes, no XML tags."
+        },
+        {
+          "role": "user",
+          "content": "<page_title>Acme AI</page_title>\n\n<full_document>\nAcme AI builds an inference platform for autonomous-picking robots. The company raised a $30M Series A in March 2026 led by Fund X partner Erin Yu.\n</full_document>\n\n<chunk>\nThe company raised a $30M Series A in March 2026 led by Fund X partner Erin Yu.\n</chunk>\n\nWrite the one-sentence synopsis for <chunk>:"
+        }
+      ],
+      "max_tokens": 200,
+      "temperature": 0
+    },
+    "request": {
+      "page_title": "Acme AI",
+      "full_document": "Acme AI builds an inference platform for autonomous-picking robots. The company raised a $30M Series A in March 2026 led by Fund X partner Erin Yu.",
+      "chunk": "The company raised a $30M Series A in March 2026 led by Fund X partner Erin Yu.",
+      "required_exact_terms": ["Acme AI", "Erin Yu"],
+      "retrieval_queries": ["who led Acme AI's Series A", "when did Acme AI raise $30M"]
+    },
+    "reference_output": "Acme AI’s $30M Series A was led by Erin Yu of Fund X in March 2026 to expand its autonomous-picking inference platform.",
+    "scorer_metadata": {
+      "source": "authored from gbrain page-summary.ts prompt contract and Cat 26 synthetic entities",
+      "eval_archetype": "human-read"
+    }
+  },
+  {
+    "id": "role-disambiguation",
+    "route": "gbrain-evals/contextual-synopsis",
+    "critical": true,
+    "mode": "isolated",
+    "input": {
+      "messages": [
+        { "role": "system", "content": "You generate one-sentence chunk synopses for a personal knowledge brain.\n\nGiven a document (the FULL_DOCUMENT block) and a chunk from it (the CHUNK\nblock), write a single concise sentence that orients the chunk within the\ndocument. Name the entities, time, and topic that the chunk is about,\nusing terms that would appear in user queries.\n\nRules:\n- One sentence, 15-30 words.\n- No preamble like \"This chunk is about\" — just write the synopsis.\n- Use the exact entity names from the document, not generic terms.\n- If the chunk is structural (heading, code block, list of links), say so.\n- Plain text only. No markdown, no quotes, no XML tags." },
+        { "role": "user", "content": "<page_title>Foundry Labs</page_title>\n\n<full_document>\nFoundry Labs makes autonomous warehouse-picking systems in Pittsburgh. Maria Lopez joined as CFO in January 2026 after running finance at SpaceX.\n</full_document>\n\n<chunk>\nMaria Lopez joined as CFO in January 2026 after running finance at SpaceX.\n</chunk>\n\nWrite the one-sentence synopsis for <chunk>:" }
+      ],
+      "max_tokens": 200,
+      "temperature": 0
+    },
+    "request": {
+      "page_title": "Foundry Labs",
+      "full_document": "Foundry Labs makes autonomous warehouse-picking systems in Pittsburgh. Maria Lopez joined as CFO in January 2026 after running finance at SpaceX.",
+      "chunk": "Maria Lopez joined as CFO in January 2026 after running finance at SpaceX.",
+      "required_exact_terms": ["Foundry Labs", "Maria Lopez"],
+      "retrieval_queries": ["who is the CFO of the warehouse robotics company", "when did Maria Lopez join Foundry Labs"]
+    },
+    "reference_output": "Maria Lopez became Foundry Labs’ CFO in January 2026, bringing prior SpaceX finance leadership to the Pittsburgh warehouse-robotics company.",
+    "scorer_metadata": { "source": "authored from Cat 26 role query", "eval_archetype": "human-read" }
+  },
+  {
+    "id": "pronoun-resolution",
+    "route": "gbrain-evals/contextual-synopsis",
+    "critical": true,
+    "mode": "isolated",
+    "input": {
+      "messages": [
+        { "role": "system", "content": "You generate one-sentence chunk synopses for a personal knowledge brain.\n\nGiven a document (the FULL_DOCUMENT block) and a chunk from it (the CHUNK\nblock), write a single concise sentence that orients the chunk within the\ndocument. Name the entities, time, and topic that the chunk is about,\nusing terms that would appear in user queries.\n\nRules:\n- One sentence, 15-30 words.\n- No preamble like \"This chunk is about\" — just write the synopsis.\n- Use the exact entity names from the document, not generic terms.\n- If the chunk is structural (heading, code block, list of links), say so.\n- Plain text only. No markdown, no quotes, no XML tags." },
+        { "role": "user", "content": "<page_title>Maya Chen</page_title>\n\n<full_document>\nMaya Chen researches memory systems for autonomous agents. Vector Forge recruited her from Stanford to lead retrieval research.\n</full_document>\n\n<chunk>\nShe joined in April 2026 and immediately began the episodic-memory benchmark project.\n</chunk>\n\nWrite the one-sentence synopsis for <chunk>:" }
+      ],
+      "max_tokens": 200,
+      "temperature": 0
+    },
+    "request": {
+      "page_title": "Maya Chen",
+      "full_document": "Maya Chen researches memory systems for autonomous agents. Vector Forge recruited her from Stanford to lead retrieval research.",
+      "chunk": "She joined in April 2026 and immediately began the episodic-memory benchmark project.",
+      "required_exact_terms": ["Maya Chen", "Vector Forge"],
+      "retrieval_queries": ["who started Vector Forge's episodic-memory benchmark", "when did Maya Chen join Vector Forge"]
+    },
+    "reference_output": "Maya Chen joined Vector Forge in April 2026 to lead retrieval research and launch the company’s episodic-memory benchmark project.",
+    "scorer_metadata": { "source": "authored pronoun-resolution branch", "eval_archetype": "human-read" }
+  },
+  {
+    "id": "meeting-decision",
+    "route": "gbrain-evals/contextual-synopsis",
+    "critical": true,
+    "mode": "isolated",
+    "input": {
+      "messages": [
+        { "role": "system", "content": "You generate one-sentence chunk synopses for a personal knowledge brain.\n\nGiven a document (the FULL_DOCUMENT block) and a chunk from it (the CHUNK\nblock), write a single concise sentence that orients the chunk within the\ndocument. Name the entities, time, and topic that the chunk is about,\nusing terms that would appear in user queries.\n\nRules:\n- One sentence, 15-30 words.\n- No preamble like \"This chunk is about\" — just write the synopsis.\n- Use the exact entity names from the document, not generic terms.\n- If the chunk is structural (heading, code block, list of links), say so.\n- Plain text only. No markdown, no quotes, no XML tags." },
+        { "role": "user", "content": "<page_title>NovaMind Board Meeting — May 2026</page_title>\n\n<full_document>\nAttendees were Amara Okafor, Jordan Lee, and Priya Shah. The board reviewed NovaMind's enterprise launch and runway.\n</full_document>\n\n<chunk>\nDecision: delay the enterprise launch until July 15 and cap June hiring at three engineers. Jordan Lee owns the revised plan.\n</chunk>\n\nWrite the one-sentence synopsis for <chunk>:" }
+      ],
+      "max_tokens": 200,
+      "temperature": 0
+    },
+    "request": {
+      "page_title": "NovaMind Board Meeting — May 2026",
+      "full_document": "Attendees were Amara Okafor, Jordan Lee, and Priya Shah. The board reviewed NovaMind's enterprise launch and runway.",
+      "chunk": "Decision: delay the enterprise launch until July 15 and cap June hiring at three engineers. Jordan Lee owns the revised plan.",
+      "required_exact_terms": ["NovaMind", "Jordan Lee"],
+      "retrieval_queries": ["when is NovaMind's enterprise launch", "who owns NovaMind's revised launch plan"]
+    },
+    "reference_output": "NovaMind’s May 2026 board delayed the enterprise launch to July 15, capped June hiring at three engineers, and assigned Jordan Lee the revision.",
+    "scorer_metadata": { "source": "authored from amara-life-v1 meeting shape", "eval_archetype": "human-read" }
+  },
+  {
+    "id": "structural-links",
+    "route": "gbrain-evals/contextual-synopsis",
+    "critical": false,
+    "mode": "isolated",
+    "input": {
+      "messages": [
+        { "role": "system", "content": "You generate one-sentence chunk synopses for a personal knowledge brain.\n\nGiven a document (the FULL_DOCUMENT block) and a chunk from it (the CHUNK\nblock), write a single concise sentence that orients the chunk within the\ndocument. Name the entities, time, and topic that the chunk is about,\nusing terms that would appear in user queries.\n\nRules:\n- One sentence, 15-30 words.\n- No preamble like \"This chunk is about\" — just write the synopsis.\n- Use the exact entity names from the document, not generic terms.\n- If the chunk is structural (heading, code block, list of links), say so.\n- Plain text only. No markdown, no quotes, no XML tags." },
+        { "role": "user", "content": "<page_title>Agent Memory Research Index</page_title>\n\n<full_document>\nAgent Memory Research Index collects the team's canonical reading on long-term agent memory and contextual retrieval.\n</full_document>\n\n<chunk>\n## References\n- Anthropic contextual retrieval\n- LongMemEval benchmark\n- Episodic memory architectures\n</chunk>\n\nWrite the one-sentence synopsis for <chunk>:" }
+      ],
+      "max_tokens": 200,
+      "temperature": 0
+    },
+    "request": {
+      "page_title": "Agent Memory Research Index",
+      "full_document": "Agent Memory Research Index collects the team's canonical reading on long-term agent memory and contextual retrieval.",
+      "chunk": "References list: Anthropic contextual retrieval; LongMemEval benchmark; episodic memory architectures.",
+      "required_exact_terms": ["Agent Memory Research Index", "LongMemEval"],
+      "retrieval_queries": ["where are the LongMemEval references", "agent memory contextual retrieval reading list"]
+    },
+    "reference_output": "Agent Memory Research Index’s references section links LongMemEval, Anthropic contextual retrieval, and episodic-memory architecture resources for the research team.",
+    "scorer_metadata": { "source": "authored structural-chunk prompt branch", "eval_archetype": "human-read" }
+  },
+  {
+    "id": "numeric-operating-fact",
+    "route": "gbrain-evals/contextual-synopsis",
+    "critical": true,
+    "mode": "isolated",
+    "input": {
+      "messages": [
+        { "role": "system", "content": "You generate one-sentence chunk synopses for a personal knowledge brain.\n\nGiven a document (the FULL_DOCUMENT block) and a chunk from it (the CHUNK\nblock), write a single concise sentence that orients the chunk within the\ndocument. Name the entities, time, and topic that the chunk is about,\nusing terms that would appear in user queries.\n\nRules:\n- One sentence, 15-30 words.\n- No preamble like \"This chunk is about\" — just write the synopsis.\n- Use the exact entity names from the document, not generic terms.\n- If the chunk is structural (heading, code block, list of links), say so.\n- Plain text only. No markdown, no quotes, no XML tags." },
+        { "role": "user", "content": "<page_title>Helix Metrics — Q2 2026</page_title>\n\n<full_document>\nHelix provides model routing infrastructure for application developers. The Q2 review covers revenue, customers, and reliability.\n</full_document>\n\n<chunk>\nHelix reached $82,000 MRR across 126 paying customers in June 2026, with 99.97% routing availability.\n</chunk>\n\nWrite the one-sentence synopsis for <chunk>:" }
+      ],
+      "max_tokens": 200,
+      "temperature": 0
+    },
+    "request": {
+      "page_title": "Helix Metrics — Q2 2026",
+      "full_document": "Helix provides model routing infrastructure for application developers. The Q2 review covers revenue, customers, and reliability.",
+      "chunk": "Helix reached $82,000 MRR across 126 paying customers in June 2026, with 99.97% routing availability.",
+      "required_exact_terms": ["Helix", "$82,000"],
+      "retrieval_queries": ["what was Helix MRR in June 2026", "how many paying customers did Helix have"]
+    },
+    "reference_output": "Helix reached $82,000 MRR from 126 paying customers in June 2026 while maintaining 99.97% availability for its model-routing infrastructure.",
+    "scorer_metadata": { "source": "authored numeric-fact retrieval case", "eval_archetype": "human-read" }
+  },
+  {
+    "id": "relationship-context",
+    "route": "gbrain-evals/contextual-synopsis",
+    "critical": false,
+    "mode": "isolated",
+    "input": {
+      "messages": [
+        { "role": "system", "content": "You generate one-sentence chunk synopses for a personal knowledge brain.\n\nGiven a document (the FULL_DOCUMENT block) and a chunk from it (the CHUNK\nblock), write a single concise sentence that orients the chunk within the\ndocument. Name the entities, time, and topic that the chunk is about,\nusing terms that would appear in user queries.\n\nRules:\n- One sentence, 15-30 words.\n- No preamble like \"This chunk is about\" — just write the synopsis.\n- Use the exact entity names from the document, not generic terms.\n- If the chunk is structural (heading, code block, list of links), say so.\n- Plain text only. No markdown, no quotes, no XML tags." },
+        { "role": "user", "content": "<page_title>Erin Yu</page_title>\n\n<full_document>\nErin Yu is a Fund X partner focused on robotics and ML infrastructure. She sits on Acme AI's board.\n</full_document>\n\n<chunk>\nShe led Foundry Labs' seed round and Acme AI's Series A, then joined Acme AI's board as lead investor representative.\n</chunk>\n\nWrite the one-sentence synopsis for <chunk>:" }
+      ],
+      "max_tokens": 200,
+      "temperature": 0
+    },
+    "request": {
+      "page_title": "Erin Yu",
+      "full_document": "Erin Yu is a Fund X partner focused on robotics and ML infrastructure. She sits on Acme AI's board.",
+      "chunk": "She led Foundry Labs' seed round and Acme AI's Series A, then joined Acme AI's board as lead investor representative.",
+      "required_exact_terms": ["Erin Yu", "Acme AI", "Foundry Labs"],
+      "retrieval_queries": ["who led Foundry Labs' seed", "which Acme AI board member represents Fund X"]
+    },
+    "reference_output": "Fund X partner Erin Yu led Foundry Labs’ seed and Acme AI’s Series A before representing the investor on Acme AI’s board.",
+    "scorer_metadata": { "source": "authored from Cat 26 cross-page relationship", "eval_archetype": "human-read" }
+  },
+  {
+    "id": "superseded-temporal-fact",
+    "route": "gbrain-evals/contextual-synopsis",
+    "critical": true,
+    "mode": "isolated",
+    "input": {
+      "messages": [
+        { "role": "system", "content": "You generate one-sentence chunk synopses for a personal knowledge brain.\n\nGiven a document (the FULL_DOCUMENT block) and a chunk from it (the CHUNK\nblock), write a single concise sentence that orients the chunk within the\ndocument. Name the entities, time, and topic that the chunk is about,\nusing terms that would appear in user queries.\n\nRules:\n- One sentence, 15-30 words.\n- No preamble like \"This chunk is about\" — just write the synopsis.\n- Use the exact entity names from the document, not generic terms.\n- If the chunk is structural (heading, code block, list of links), say so.\n- Plain text only. No markdown, no quotes, no XML tags." },
+        { "role": "user", "content": "<page_title>Orbit Robotics Launch Plan</page_title>\n\n<full_document>\nOrbit Robotics originally planned a September beta. A July 2026 review superseded that schedule after safety testing finished early.\n</full_document>\n\n<chunk>\nCurrent plan as of July 22, 2026: public beta opens August 12; the September date is obsolete. Priya Shah owns launch readiness.\n</chunk>\n\nWrite the one-sentence synopsis for <chunk>:" }
+      ],
+      "max_tokens": 200,
+      "temperature": 0
+    },
+    "request": {
+      "page_title": "Orbit Robotics Launch Plan",
+      "full_document": "Orbit Robotics originally planned a September beta. A July 2026 review superseded that schedule after safety testing finished early.",
+      "chunk": "Current plan as of July 22, 2026: public beta opens August 12; the September date is obsolete. Priya Shah owns launch readiness.",
+      "required_exact_terms": ["Orbit Robotics", "Priya Shah", "August 12"],
+      "retrieval_queries": ["when does Orbit Robotics public beta open", "who owns Orbit Robotics launch readiness"]
+    },
+    "reference_output": "Orbit Robotics’ July 22, 2026 plan moves public beta to August 12, supersedes September, and assigns launch readiness to Priya Shah.",
+    "scorer_metadata": { "source": "authored temporal supersession case", "eval_archetype": "human-read" }
+  }
+]

@@ -1,0 +1,32 @@
+version: 1
+
+product:
+  slug: "gbrain-evals"
+  repo: "patelnav/gbrain-evals"
+  default_branch: "main"
+
+routes:
+  - id: "contextual-synopsis"
+    route_id: "gbrain-evals/contextual-synopsis"
+    name: "gbrain: per-chunk synopsis"
+    code_refs:
+      - "eval/runner/contextual-synopsis-route.ts"
+      - "eval/runner/cat26-contextual-retrieval.ts"
+    metadata:
+      eval_archetype: "human-read"
+      observed_model: "anthropic/claude-haiku-4-5-20251001"
+      evaluation_scope: "synopsis output contract; retrieval Recall@5/@10 is reported by the separate corpus runner"
+    call_site:
+      base_url_env: "ANTHROPIC_BASE_URL"
+    seed:
+      incumbent_model: "anthropic/claude-fable-5"
+    eval_pack:
+      id: "contextual_synopsis_v1"
+      config_path: ".benchrouter/benchrouter.yml"
+      workflow: ".github/workflows/benchrouter-evals.yml"
+      command: "npm run benchrouter:eval"
+      capture_command: "npm run benchrouter:eval"
+      scorer: ".benchrouter/scorer.contextual-synopsis.js"
+      result_schema: "benchrouter.result.v1"
+      case_refs:
+        - ".benchrouter/cases.contextual-synopsis.json"

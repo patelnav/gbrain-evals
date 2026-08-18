@@ -1,0 +1,165 @@
+name: BenchRouter Evals
+run-name: "${{ inputs.benchrouter_run_name || (github.event_name == 'pull_request' && format('BenchRouter · PR testing route changes · #{0}', github.event.pull_request.number)) || 'BenchRouter · Publishing route configuration' }}"
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .benchrouter/**
+  push:
+    branches:
+      - main
+    paths:
+      - .benchrouter/**
+  workflow_dispatch:
+    inputs:
+      benchrouter_result_set_id:
+        description: BenchRouter result set ID
+        required: false
+      benchrouter_dispatch_attempt_id:
+        description: BenchRouter dispatch attempt ID
+        required: false
+      benchrouter_run_name:
+        description: Why this BenchRouter test is running
+        required: false
+      benchrouter_route_id:
+        description: Account-local BenchRouter route ID
+        required: true
+      base_route_id:
+        description: Stable base route ID used for eval-case selection
+        required: false
+      config_path:
+        description: BenchRouter config path
+        required: true
+        default: .benchrouter/benchrouter.yml
+      eval_ref:
+        description: Commit SHA or ref under evaluation
+        required: true
+      benchrouter_api_url:
+        description: BenchRouter API base URL
+        required: true
+        default: https://api.benchrouter.com
+      benchrouter_judge_model:
+        description: Default semantic-judge model for scorer judge() calls
+        required: false
+      benchrouter_plan:
+        description: Internal BenchRouter plan. Start evals from BenchRouter or the CLI.
+        required: true
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: benchrouter-eval-${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.benchrouter_result_set_id || fromJSON(github.event.inputs.benchrouter_plan || '{}').result_set_id }}
+  cancel-in-progress: true
+jobs:
+  benchrouter-routes:
+    name: Prepare BenchRouter route tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.routes.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.inputs.eval_ref || github.sha }}
+      - name: Derive BenchRouter route matrix
+        id: routes
+        run: node .benchrouter/upload-results.mjs routes-matrix
+        env:
+          BENCHROUTER_DEFAULT_CONFIG_PATH: .benchrouter/benchrouter.yml
+          BENCHROUTER_INPUT_ROUTE_ID: ${{ github.event.inputs.benchrouter_route_id }}
+          BENCHROUTER_INPUT_BASE_ROUTE_ID: ${{ github.event.inputs.base_route_id || github.event.inputs.benchrouter_route_id }}
+          BENCHROUTER_INPUT_RESULT_SET_ID: ${{ github.event.inputs.benchrouter_result_set_id || fromJSON(github.event.inputs.benchrouter_plan || '{}').result_set_id }}
+          BENCHROUTER_INPUT_PLAN_JSON: ${{ github.event.inputs.benchrouter_plan }}
+  benchrouter-eval:
+    name: ${{ matrix.job_name }}
+    needs: benchrouter-routes
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout_minutes || 20 }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.benchrouter-routes.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.inputs.eval_ref || github.sha }}
+      - name: Report BenchRouter route snapshot
+        if: github.event_name != 'workflow_dispatch'
+        run: node .benchrouter/upload-results.mjs report-snapshot
+        env:
+          BENCHROUTER_API_URL: ${{ github.event.inputs.benchrouter_api_url || 'https://api.benchrouter.com' }}
+          BENCHROUTER_REPO_FULL_NAME: patelnav/gbrain-evals
+          BENCHROUTER_CONFIG_PATH: ${{ github.event.inputs.config_path || '.benchrouter/benchrouter.yml' }}
+          BENCHROUTER_PR_NUMBER: ${{ github.event.pull_request.number }}
+          BENCHROUTER_OIDC_AUDIENCE: benchrouter
+      - name: Prepare BenchRouter eval context
+        run: node .benchrouter/upload-results.mjs prepare
+        env:
+          BENCHROUTER_DEFAULT_API_URL: https://api.benchrouter.com
+          BENCHROUTER_DEFAULT_ROUTE_ID: ${{ matrix.route_id }}
+          BENCHROUTER_DEFAULT_CONFIG_PATH: .benchrouter/benchrouter.yml
+          BENCHROUTER_FIXED_EVAL_COMMAND: npm run benchrouter:eval
+          BENCHROUTER_DEFAULT_INCUMBENT_MODEL: ${{ matrix.incumbent_model }}
+          BENCHROUTER_INPUT_API_URL: ${{ github.event.inputs.benchrouter_api_url }}
+          BENCHROUTER_INPUT_RESULT_SET_ID: ${{ matrix.result_set_id || github.event.inputs.benchrouter_result_set_id || fromJSON(github.event.inputs.benchrouter_plan || '{}').result_set_id }}
+          BENCHROUTER_INPUT_DISPATCH_ATTEMPT_ID: ${{ github.event.inputs.benchrouter_dispatch_attempt_id }}
+          BENCHROUTER_INPUT_ROUTE_ID: ${{ matrix.route_id }}
+          BENCHROUTER_INPUT_BASE_ROUTE_ID: ${{ matrix.base_route_id || github.event.inputs.base_route_id || matrix.route_id }}
+          BENCHROUTER_INPUT_CONFIG_PATH: ${{ github.event.inputs.config_path }}
+          BENCHROUTER_INPUT_PLAN_JSON: ${{ github.event.inputs.benchrouter_plan }}
+          BENCHROUTER_INPUT_MODEL_ID: ${{ matrix.model }}
+          BENCHROUTER_INPUT_MODEL_RUN_ACTION: ${{ matrix.model_run_action }}
+          BENCHROUTER_INPUT_MODEL_RUN_ID: ${{ matrix.model_run_id }}
+          BENCHROUTER_INPUT_EVAL_REF: ${{ github.event.inputs.eval_ref }}
+          BENCHROUTER_INPUT_JUDGE_MODEL: ${{ github.event.inputs.benchrouter_judge_model }}
+          BENCHROUTER_EVENT_EVAL_REF: ${{ github.event.pull_request.head.sha || github.event.inputs.eval_ref || github.sha }}
+      - name: Validate BenchRouter workflow dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: node .benchrouter/upload-results.mjs validate-dispatch
+      - name: Plan BenchRouter PR eval
+        if: github.event_name == 'pull_request'
+        run: node .benchrouter/upload-results.mjs plan-pr
+        env:
+          BENCHROUTER_API_URL: ${{ github.event.inputs.benchrouter_api_url || 'https://api.benchrouter.com' }}
+          BENCHROUTER_REPO_FULL_NAME: patelnav/gbrain-evals
+          BENCHROUTER_PR_NUMBER: ${{ github.event.pull_request.number }}
+          BENCHROUTER_PR_URL: ${{ github.event.pull_request.html_url }}
+          BENCHROUTER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BENCHROUTER_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BENCHROUTER_OIDC_AUDIENCE: benchrouter
+      - name: Import BenchRouter default branch config
+        if: github.event_name == 'push' && strategy.job-index == 0
+        run: node .benchrouter/upload-results.mjs import-main
+        env:
+          BENCHROUTER_API_URL: ${{ github.event.inputs.benchrouter_api_url || 'https://api.benchrouter.com' }}
+          BENCHROUTER_REPO_FULL_NAME: patelnav/gbrain-evals
+          BENCHROUTER_OIDC_AUDIENCE: benchrouter
+      - name: Setup Node.js
+        if: github.event_name == 'workflow_dispatch' || env.BENCHROUTER_PLAN_ACTION == 'run'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test route models and update the PPF
+        if: github.event_name == 'pull_request' && env.BENCHROUTER_PLAN_ACTION == 'run'
+        run: node .benchrouter/upload-results.mjs run-session
+        env:
+          BENCHROUTER_REPO_FULL_NAME: patelnav/gbrain-evals
+          BENCHROUTER_OIDC_AUDIENCE: benchrouter
+      - name: Run BenchRouter model pack
+        if: github.event_name == 'workflow_dispatch'
+        run: node .benchrouter/upload-results.mjs run-pack
+        env:
+          BENCHROUTER_PACK_MEMBERS_JSON: ${{ matrix.pack_members_json }}
+          BENCHROUTER_EVAL_COMMAND: npm run benchrouter:eval
+      - name: Upload debug artifacts
+        if: always() && github.event_name == 'workflow_dispatch' || env.BENCHROUTER_PLAN_ACTION == 'run'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchrouter-results-${{ matrix.pack_index || strategy.job-index }}
+          include-hidden-files: true
+          path: |-
+            .benchrouter/results*.jsonl
+            .benchrouter/fingerprint*.json
+            .benchrouter/run-error*.json
+            .benchrouter/upload-error*.json
