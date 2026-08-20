@@ -23,11 +23,14 @@
     "eval:brainbench:smoke": "BRAINBENCH_N=1 BRAINBENCH_CONCURRENCY=2 bun eval/runner/all.ts",
     "eval:brainbench:published": "BRAINBENCH_N=10 BRAINBENCH_CONCURRENCY=2 bun eval/runner/all.ts",
     "eval:cat6": "bun eval/runner/cat6-prose-scale.ts",
-    "eval:cat11": "bun eval/runner/cat11-multimodal.ts"
+    "eval:cat11": "bun eval/runner/cat11-multimodal.ts",
+    "eval:contextual-synopsis": "bun eval/runner/cat26-contextual-retrieval.ts --benchrouter",
+    "benchrouter:eval": "node .benchrouter/benchrouter-eval.mjs",
+    "benchrouter:calibrate": "node .benchrouter/benchrouter-calibrate.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
-    "gbrain": "github:garrytan/gbrain#master"
+    "gbrain": "github:garrytan/gbrain#07f5d28dcfe1b117cfd1a2b5d57c9fe77efc74ee"
   },
   "devDependencies": {
     "@types/bun": "latest",

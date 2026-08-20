@@ -1,0 +1,5 @@
+results*.jsonl
+captured*.jsonl
+fingerprint*.json
+sidecar*.port
+results/

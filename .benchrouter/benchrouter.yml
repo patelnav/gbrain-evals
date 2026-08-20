@@ -1,0 +1,68 @@
+version: 1
+
+product:
+  slug: "gbrain-evals"
+  repo: "patelnav/gbrain-evals"
+  default_branch: "main"
+
+routes:
+  - id: "contextual-synopsis"
+    route_id: "gbrain-evals/contextual-synopsis"
+    name: "Contextual Synopsis"
+    code_refs:
+      - "eval/runner/cat26-contextual-retrieval.ts"
+    metadata:
+      # TODO: code-consumed | human-read | neither-defensible
+      eval_archetype: ""
+    call_site:
+      base_url_env: "ANTHROPIC_BASE_URL"
+      provider_id: "anthropic"
+      provider_ref: "claude-haiku-4-5-20251001"
+    seed:
+      incumbent_model: "anthropic/claude-haiku-4.5"
+    eval_pack:
+      id: "contextual_synopsis_v1"
+      config_path: ".benchrouter/benchrouter.yml"
+      workflow: ".github/workflows/benchrouter-evals.yml"
+      command: "bun run eval:contextual-synopsis"
+      capture_command: "npm run benchrouter:eval"
+      mode: repository_executable
+      runtime: "bun"
+      runtime_version: "1.3.6"
+      lockfile: "bun.lock"
+      result_path: ".benchrouter/executable-result.json"
+      primary_metric: "recall_at_1"
+      max_model_calls: 24
+      max_cost_usd: 15
+      max_cost_per_call_usd: 1
+      timeout_minutes: 45
+      argv:
+        - "bun"
+        - "eval/runner/cat26-contextual-retrieval.ts"
+        - "--benchrouter"
+      input_refs:
+        - "eval/runner/cat26-contextual-retrieval.ts"
+        - "eval/data/cat26-contextual-retrieval/corpus.json"
+        - "eval/data/world-v1/companies__acme-0.json"
+        - "eval/data/world-v1/companies__beta-1.json"
+        - "eval/data/world-v1/companies__gamma-2.json"
+        - "eval/data/world-v1/companies__delta-3.json"
+        - "eval/data/world-v1/companies__epsilon-4.json"
+        - "eval/data/world-v1/people__mia-brown-0.json"
+        - "eval/data/world-v1/people__victor-taylor-1.json"
+        - "eval/data/world-v1/people__mark-jones-2.json"
+        - "eval/data/world-v1/people__victor-wilson-3.json"
+        - "eval/data/world-v1/people__paul-rodriguez-4.json"
+        - "eval/data/world-v1/meetings__board-acme-2025-q1-0.json"
+        - "eval/data/world-v1/meetings__board-beta-2025-q2-1.json"
+        - "eval/data/world-v1/meetings__board-gamma-2025-q3-2.json"
+        - "eval/data/world-v1/meetings__board-delta-2025-q4-3.json"
+        - "eval/data/world-v1/meetings__board-epsilon-2025-q1-4.json"
+      acceptance_refs:
+        - "eval/data/cat26-contextual-retrieval/queries.json"
+      secret_env:
+        - "OPENAI_API_KEY"
+      scorer: ".benchrouter/scorer.contextual-synopsis.js"
+      result_schema: "benchrouter.executable_result.v1"
+      case_refs:
+        - "eval/data/cat26-contextual-retrieval/queries.json"

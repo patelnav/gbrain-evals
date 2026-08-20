@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "source": "world-v1",
+  "page_refs": [
+    "eval/data/world-v1/companies__acme-0.json",
+    "eval/data/world-v1/companies__beta-1.json",
+    "eval/data/world-v1/companies__gamma-2.json",
+    "eval/data/world-v1/companies__delta-3.json",
+    "eval/data/world-v1/companies__epsilon-4.json",
+    "eval/data/world-v1/people__mia-brown-0.json",
+    "eval/data/world-v1/people__victor-taylor-1.json",
+    "eval/data/world-v1/people__mark-jones-2.json",
+    "eval/data/world-v1/people__victor-wilson-3.json",
+    "eval/data/world-v1/people__paul-rodriguez-4.json",
+    "eval/data/world-v1/meetings__board-acme-2025-q1-0.json",
+    "eval/data/world-v1/meetings__board-beta-2025-q2-1.json",
+    "eval/data/world-v1/meetings__board-gamma-2025-q3-2.json",
+    "eval/data/world-v1/meetings__board-delta-2025-q4-3.json",
+    "eval/data/world-v1/meetings__board-epsilon-2025-q1-4.json"
+  ]
+}
