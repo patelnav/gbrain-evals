@@ -1,0 +1,51 @@
+{
+  "version": "0.0.10",
+  "generated_by": "benchrouter.setup_packet.v1",
+  "product": {
+    "slug": "gbrain-evals",
+    "default_branch": "main",
+    "repo_full_name": "patelnav/gbrain-evals"
+  },
+  "files": [
+    {
+      "path": ".benchrouter/benchrouter.yml",
+      "sha256": "ae3acfa84c6c03ff242bff693ac2e259fb35b3d1162e0bc50bfad1e846e6fc42"
+    },
+    {
+      "path": ".env.example",
+      "sha256": "6c366a3ab1afbf77ddfa35df7e756c1d040ee98724f61cd93ea034f65d62c31a"
+    },
+    {
+      "path": ".benchrouter/README.md",
+      "sha256": "c5ef169153cfd86505e3630a6f429341c6e40a9d54c2ad93989e69a295581090"
+    },
+    {
+      "path": ".benchrouter/SETUP_README.md",
+      "sha256": "e2cae7acf9cd9557c5c8523c6d101c8f98aab38ea0bea1cb07cd16e12d22f964"
+    },
+    {
+      "path": ".benchrouter/.gitignore",
+      "sha256": "90cb99e3486f414deb00c11f8bd62c6c5cd9570ff7f60a678bbd3db6f6b50385"
+    },
+    {
+      "path": ".github/workflows/benchrouter-evals.yml",
+      "sha256": "1acbb035d228d0678bcc9297126690b4d0f874b9d87346abcf90ef4ece1b2526"
+    },
+    {
+      "path": ".benchrouter/benchrouter-eval.mjs",
+      "sha256": "a9c8fe5b659c84e01d1757b129b2b8dca3f909f195e2a1b3a9641838bed4df9d"
+    },
+    {
+      "path": ".benchrouter/benchrouter-calibrate.mjs",
+      "sha256": "09f0e275de616201eca9033e01731514a5e26f6ce18d5c55ace3bcddbfc5cd44"
+    },
+    {
+      "path": ".benchrouter/upload-results.mjs",
+      "sha256": "da663e5966b7612bf851014b259b7ce82b8a6ca838ff675f63277b862838ba44"
+    },
+    {
+      "path": ".benchrouter/sidecar.mjs",
+      "sha256": "19f55dd28c3e4e50ceb90da20bc9b96b8bfb99a3529f8d161db1b1d2672481e8"
+    }
+  ]
+}

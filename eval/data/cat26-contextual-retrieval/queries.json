@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "queries": [
+    {
+      "id": "q01",
+      "query": "Which founder of a behavioral endpoint security company announced its Series A on LinkedIn in January 2025?",
+      "relevant_slugs": ["people/victor-taylor-1"]
+    },
+    {
+      "id": "q02",
+      "query": "Which threat-intelligence founder took a three-week Patagonia climbing trip after the company crossed 500 enterprise customers?",
+      "relevant_slugs": ["people/victor-taylor-1"]
+    },
+    {
+      "id": "q03",
+      "query": "Which patient founder of a cross-border payment reconciliation startup hired a first VP of Engineering in April 2025?",
+      "relevant_slugs": ["people/mark-jones-2"]
+    },
+    {
+      "id": "q04",
+      "query": "Which founder who personally onboarded early payment-reconciliation customers announced an 8 million dollar Series A in 2024?",
+      "relevant_slugs": ["people/mark-jones-2"]
+    },
+    {
+      "id": "q05",
+      "query": "Which collaborative synthetic-biology founder announced partnerships with two university research labs in April 2024?",
+      "relevant_slugs": ["people/victor-wilson-3"]
+    },
+    {
+      "id": "q06",
+      "query": "Which founder who shares internal roadmaps publicly co-authored an open white paper on modular biotech infrastructure?",
+      "relevant_slugs": ["people/victor-wilson-3"]
+    },
+    {
+      "id": "q07",
+      "query": "Which long-term-thinking security founder closed an oversubscribed 22 million dollar Series A during the 2022 downturn?",
+      "relevant_slugs": ["people/paul-rodriguez-4"]
+    },
+    {
+      "id": "q08",
+      "query": "Which cybersecurity founder who rejects moving fast and breaking things began Series B talks targeting 50 to 60 million dollars?",
+      "relevant_slugs": ["people/paul-rodriguez-4"]
+    }
+  ]
+}
