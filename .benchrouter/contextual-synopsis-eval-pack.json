@@ -46,6 +46,6 @@
   "max_cost_per_call_usd": 1,
   "timeout_minutes": 45,
   "secret_env": [
-    "OPENAI_API_KEY"
+    "GOOGLE_GENERATIVE_AI_API_KEY"
   ]
 }

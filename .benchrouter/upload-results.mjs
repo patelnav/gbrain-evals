@@ -248,6 +248,11 @@ async function main() {
     return;
   }
 
+  if (command === "observe-dispatch") {
+    await observeWorkflowDispatch(apiUrl);
+    return;
+  }
+
   if (command === "routes-matrix") {
     await emitRoutesMatrix();
     return;
@@ -500,6 +505,16 @@ function validateWorkflowDispatch() {
   if (!["run", "reuse"].includes(process.env.BENCHROUTER_MODEL_RUN_ACTION)) {
     throw new Error("BENCHROUTER_MODEL_RUN_ACTION must be run or reuse for workflow_dispatch");
   }
+}
+
+async function observeWorkflowDispatch(apiUrl) {
+  const request = {
+    repo_full_name: requiredEnv("BENCHROUTER_REPO_FULL_NAME"),
+    result_set_id: requiredEnv("BENCHROUTER_RESULT_SET_ID"),
+    dispatch_attempt_id: requiredEnv("BENCHROUTER_DISPATCH_ATTEMPT_ID")
+  };
+  await postBenchRouterJson(apiUrl, "/v1/control/eval-dispatch/observe", request, "eval-dispatch");
+  console.log("BenchRouter bound dispatch attempt " + request.dispatch_attempt_id + " to workflow run " + requiredEnv("GITHUB_RUN_ID"));
 }
 
 async function planPullRequestEval(apiUrl) {
