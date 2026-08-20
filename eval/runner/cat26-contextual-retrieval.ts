@@ -337,21 +337,40 @@ function toRankedDocs(results: Array<{ slug: string; score?: number }>): RankedD
   return docs;
 }
 
+async function importFixturePages(
+  engine: PGLiteEngine,
+  pages: CorpusPage[],
+): Promise<FixtureStats> {
+  const perPageChunks: Record<string, number> = {};
+  let totalChunks = 0;
+  for (const page of pages) {
+    const body = `# ${page.title}\n\n${page.body}\n`;
+    const imported = await importFromContent(engine, page.slug, body, { noEmbed: true });
+    if (imported.status !== 'imported') {
+      throw new Error(
+        `fixture import failed for ${page.slug}: ${imported.status}${imported.error ? ` (${imported.error})` : ''}`,
+      );
+    }
+    const storedPage = await engine.getPage(page.slug, { sourceId: 'default' });
+    if (!storedPage) {
+      throw new Error(`fixture import did not persist page ${page.slug}`);
+    }
+    const chunks = await engine.getChunks(page.slug, { sourceId: 'default' });
+    if (chunks.length === 0) {
+      throw new Error(`fixture import produced no chunks for ${page.slug}`);
+    }
+    perPageChunks[page.slug] = chunks.length;
+    totalChunks += chunks.length;
+  }
+  return { totalChunks, perPageChunks };
+}
+
 async function measureFixtureChunks(pages: CorpusPage[]): Promise<FixtureStats> {
   const engine = new PGLiteEngine() as PGLiteEngine;
   try {
     await engine.connect({});
     await engine.initSchema();
-    const perPageChunks: Record<string, number> = {};
-    let totalChunks = 0;
-    for (const page of pages) {
-      const body = `# ${page.title}\n\n${page.body}\n`;
-      await importFromContent(engine, page.slug, body, { noEmbed: true });
-      const chunks = await engine.getChunks(page.slug, { sourceId: 'default' });
-      perPageChunks[page.slug] = chunks.length;
-      totalChunks += chunks.length;
-    }
-    return { totalChunks, perPageChunks };
+    return await importFixturePages(engine, pages);
   } finally {
     await engine.disconnect();
   }
@@ -530,14 +549,8 @@ async function runMode(
     console.log = () => {};
 
     await engine.setConfig('contextual_retrieval', mode);
-    for (const page of pages) {
-      const body = `# ${page.title}\n\n${page.body}\n`;
-      await importFromContent(engine, page.slug, body, { noEmbed: false });
-    }
-
-    const expectedCalls = (await Promise.all(
-      pages.map(page => engine.getChunks(page.slug, { sourceId: 'default' })),
-    )).reduce((sum, chunks) => sum + chunks.length, 0);
+    const fixtureStats = await importFixturePages(engine, pages);
+    const expectedCalls = fixtureStats.totalChunks;
     const callsBefore = modelCallIds.length;
 
     if (mode === 'per_chunk_synopsis') {
