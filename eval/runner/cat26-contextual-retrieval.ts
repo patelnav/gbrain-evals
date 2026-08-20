@@ -19,7 +19,7 @@
  *   - Synopsis uses gbrain native Anthropic Messages via ANTHROPIC_BASE_URL
  *   - Outbound model is `anthropic:<route-id>` (unprefixed route id in body)
  *   - Forced candidate belongs only in BENCHROUTER_EVAL_HEADERS_JSON
- *   - Embeddings stay on openai:text-embedding-3-large at api.openai.com
+ *   - Embeddings stay on google:gemini-embedding-001 at 1,536 dimensions
  *   - Captures x-benchrouter-model-call-id from /v1/messages responses only
  *   - Synopsis page_fallback fails the eval
  *   - Writes benchrouter.executable_result.v1 to result_path
@@ -44,7 +44,7 @@ const QUERIES_PATH = 'eval/data/cat26-contextual-retrieval/queries.json';
 const EVAL_PACK_PATH = '.benchrouter/contextual-synopsis-eval-pack.json';
 const ROUTE_ID = 'gbrain-evals/contextual-synopsis';
 const INCUMBENT_SYNOPSIS_MODEL = 'anthropic:claude-haiku-4-5-20251001';
-const EMBEDDING_MODEL = 'openai:text-embedding-3-large';
+const EMBEDDING_MODEL = 'google:gemini-embedding-001';
 const EMBEDDING_DIM = 1536;
 const PRIMARY_METRIC = 'recall_at_1';
 
@@ -259,7 +259,7 @@ let benchRouterRoutingInstalled = false;
 /**
  * BenchRouter synopsis routing preserves native Anthropic Messages:
  * ANTHROPIC_BASE_URL → eval base; outbound model stays anthropic:<route-id>.
- * Embeddings retain the gateway's fixed OpenAI configuration and receive no
+ * Embeddings retain the gateway's fixed Google configuration and receive no
  * BenchRouter eval headers.
  */
 function installBenchRouterSynopsisRouting(): void {
@@ -383,6 +383,12 @@ function validateEvalPackContract(pack: EvalPack): void {
   }
   if (pack.secret_env?.includes('ANTHROPIC_API_KEY')) {
     throw new Error('eval-pack secret_env must not require ANTHROPIC_API_KEY');
+  }
+  if (!pack.secret_env?.includes('GOOGLE_GENERATIVE_AI_API_KEY')) {
+    throw new Error('eval-pack secret_env must require GOOGLE_GENERATIVE_AI_API_KEY');
+  }
+  if (pack.secret_env?.includes('OPENAI_API_KEY')) {
+    throw new Error('eval-pack secret_env must not require OPENAI_API_KEY');
   }
   if (pack.lockfile) readFileSync(pack.lockfile, 'utf8');
 }

@@ -9,7 +9,7 @@
   "files": [
     {
       "path": ".benchrouter/benchrouter.yml",
-      "sha256": "ae3acfa84c6c03ff242bff693ac2e259fb35b3d1162e0bc50bfad1e846e6fc42"
+      "sha256": "e0d9ebf5b4dd42747719b5ee9e38080c2581a0de3692629bc930a61ba3864cfc"
     },
     {
       "path": ".env.example",
@@ -29,7 +29,7 @@
     },
     {
       "path": ".github/workflows/benchrouter-evals.yml",
-      "sha256": "1acbb035d228d0678bcc9297126690b4d0f874b9d87346abcf90ef4ece1b2526"
+      "sha256": "c779db4090f8ae8f7a0263052b5efa5fd1785468b8ccc71c478667615b5b0fcc"
     },
     {
       "path": ".benchrouter/benchrouter-eval.mjs",
@@ -41,7 +41,7 @@
     },
     {
       "path": ".benchrouter/upload-results.mjs",
-      "sha256": "da663e5966b7612bf851014b259b7ce82b8a6ca838ff675f63277b862838ba44"
+      "sha256": "821e37596603851c02a504c137dfe4993f3072b201774aac12de85dd64f37cb9"
     },
     {
       "path": ".benchrouter/sidecar.mjs",

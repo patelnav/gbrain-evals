@@ -101,6 +101,15 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Bind BenchRouter dispatch to this workflow run
+        if: github.event_name == 'workflow_dispatch'
+        run: node .benchrouter/upload-results.mjs observe-dispatch
+        env:
+          BENCHROUTER_API_URL: ${{ github.event.inputs.benchrouter_api_url || 'https://api.benchrouter.com' }}
+          BENCHROUTER_REPO_FULL_NAME: patelnav/gbrain-evals
+          BENCHROUTER_RESULT_SET_ID: ${{ github.event.inputs.benchrouter_result_set_id || fromJSON(github.event.inputs.benchrouter_plan || '{}').result_set_id }}
+          BENCHROUTER_DISPATCH_ATTEMPT_ID: ${{ github.event.inputs.benchrouter_dispatch_attempt_id }}
+          BENCHROUTER_OIDC_AUDIENCE: benchrouter
       - name: Derive BenchRouter route matrix
         id: routes
         run: node .benchrouter/upload-results.mjs routes-matrix
@@ -200,7 +209,7 @@ jobs:
         env:
           BENCHROUTER_PACK_MEMBERS_JSON: ${{ matrix.pack_members_json }}
           BENCHROUTER_EVAL_COMMAND: npm run benchrouter:eval
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
       - name: Upload debug artifacts
         if: always() && github.event_name == 'workflow_dispatch' || env.BENCHROUTER_PLAN_ACTION == 'run'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

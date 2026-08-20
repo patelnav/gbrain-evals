@@ -61,7 +61,7 @@ routes:
       acceptance_refs:
         - "eval/data/cat26-contextual-retrieval/queries.json"
       secret_env:
-        - "OPENAI_API_KEY"
+        - "GOOGLE_GENERATIVE_AI_API_KEY"
       scorer: ".benchrouter/scorer.contextual-synopsis.js"
       result_schema: "benchrouter.executable_result.v1"
       case_refs:
