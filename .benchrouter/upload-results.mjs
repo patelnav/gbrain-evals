@@ -1014,7 +1014,7 @@ async function runModelPackMembers(apiUrl, members, baseEnv) {
       try {
         runtimeEnv.BENCHROUTER_FAILED_STEP = session ? "run-or-upload" : "start";
         runtimeEnv.BENCHROUTER_GITHUB_CONCLUSION = "failure";
-        const failureOidc = session?.uploadToken ? "" : await requestGitHubOidcToken(modelRunAudience(member.model_run_id));
+        const failureOidc = await requestGitHubOidcToken(modelRunAudience(member.model_run_id));
         await notifyFailure(apiUrl, member.model_run_id, session?.uploadToken || "", failureOidc, false, runtimeEnv);
       } catch (notifyError) {
         console.error("BenchRouter pack member failure notification failed", member.model_run_id, notifyError);
