@@ -33,8 +33,8 @@ routes:
       result_path: ".benchrouter/executable-result.json"
       primary_metric: "mrr"
       max_model_calls: 24
-      max_cost_usd: 15
-      max_cost_per_call_usd: 1
+      max_cost_usd: 2
+      max_cost_per_call_usd: 0.25
       timeout_minutes: 45
       argv:
         - "bun"
