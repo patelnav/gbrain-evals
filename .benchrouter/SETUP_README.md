@@ -42,7 +42,7 @@ Routes: gbrain-evals/contextual-synopsis
 - Treat case_refs as declared executable evidence files. They can use the evaluator's native shape, including object-shaped qrels. Do not rewrite them as isolated-replay case arrays.
 - Do not create an isolated-replay cases file, scorer, or scorer calibration fixture for these routes.
 - Confirm every declared config, workflow, lockfile, input, acceptance, and case reference exists in the repository.
-- Confirm the evaluator writes benchrouter.executable_result.v1 at result_path with the declared primary metric and the exact BenchRouter model_call_ids it received.
+- Confirm the evaluator writes benchrouter.executable_result.v1 at result_path with the declared primary metric and observations. BenchRouter derives model-call evidence from its durable request rows, so the evaluator must not echo response-header IDs.
 - Quality is produced by the declared executable result after the evaluator runs. Local calibration does not run the evaluator and does not certify task quality.
 
 ## 3. Calibrate The Executable Declaration

@@ -1,45 +1,40 @@
 {
   "schema_version": 1,
   "queries": [
-    {
-      "id": "q01",
-      "query": "Which founder of a behavioral endpoint security company announced its Series A on LinkedIn in January 2025?",
-      "relevant_slugs": ["people/victor-taylor-1"]
-    },
-    {
-      "id": "q02",
-      "query": "Which threat-intelligence founder took a three-week Patagonia climbing trip after the company crossed 500 enterprise customers?",
-      "relevant_slugs": ["people/victor-taylor-1"]
-    },
-    {
-      "id": "q03",
-      "query": "Which patient founder of a cross-border payment reconciliation startup hired a first VP of Engineering in April 2025?",
-      "relevant_slugs": ["people/mark-jones-2"]
-    },
-    {
-      "id": "q04",
-      "query": "Which founder who personally onboarded early payment-reconciliation customers announced an 8 million dollar Series A in 2024?",
-      "relevant_slugs": ["people/mark-jones-2"]
-    },
-    {
-      "id": "q05",
-      "query": "Which collaborative synthetic-biology founder announced partnerships with two university research labs in April 2024?",
-      "relevant_slugs": ["people/victor-wilson-3"]
-    },
-    {
-      "id": "q06",
-      "query": "Which founder who shares internal roadmaps publicly co-authored an open white paper on modular biotech infrastructure?",
-      "relevant_slugs": ["people/victor-wilson-3"]
-    },
-    {
-      "id": "q07",
-      "query": "Which long-term-thinking security founder closed an oversubscribed 22 million dollar Series A during the 2022 downturn?",
-      "relevant_slugs": ["people/paul-rodriguez-4"]
-    },
-    {
-      "id": "q08",
-      "query": "Which cybersecurity founder who rejects moving fast and breaking things began Series B talks targeting 50 to 60 million dollars?",
-      "relevant_slugs": ["people/paul-rodriguez-4"]
-    }
+    {"id":"q01","query":"Which founder of a behavioral endpoint security company announced its Series A on LinkedIn in January 2025?","relevant_slugs":["people/victor-taylor-1"]},
+    {"id":"q02","query":"Which threat-intelligence founder took a three-week Patagonia climbing trip after the company crossed 500 enterprise customers?","relevant_slugs":["people/victor-taylor-1"]},
+    {"id":"q03","query":"Which patient founder of a cross-border payment reconciliation startup hired a first VP of Engineering in April 2025?","relevant_slugs":["people/mark-jones-2"]},
+    {"id":"q04","query":"Which founder who personally onboarded early payment-reconciliation customers announced an 8 million dollar Series A in 2024?","relevant_slugs":["people/mark-jones-2"]},
+    {"id":"q05","query":"Which collaborative synthetic-biology founder announced partnerships with two university research labs in April 2024?","relevant_slugs":["people/victor-wilson-3"]},
+    {"id":"q06","query":"Which founder who shares internal roadmaps publicly co-authored an open white paper on modular biotech infrastructure?","relevant_slugs":["people/victor-wilson-3"]},
+    {"id":"q07","query":"Which long-term-thinking security founder closed an oversubscribed 22 million dollar Series A during the 2022 downturn?","relevant_slugs":["people/paul-rodriguez-4"]},
+    {"id":"q08","query":"Which cybersecurity founder who rejects moving fast and breaking things began Series B talks targeting 50 to 60 million dollars?","relevant_slugs":["people/paul-rodriguez-4"]},
+    {"id":"q09","query":"Which robotics founder studied mechanical engineering at MIT before joining a drone startup acquired by Amazon?","relevant_slugs":["people/mia-brown-0"]},
+    {"id":"q10","query":"Who was the industrial robotics founder featured in a January 2025 Wired article about next-generation founders?","relevant_slugs":["people/mia-brown-0"]},
+    {"id":"q11","query":"Which robotics company was incorporated in Delaware in 2021 and built the Acme Flex Unit warehouse picking robot?","relevant_slugs":["companies/acme-0"]},
+    {"id":"q12","query":"Which robotics startup hired its first dedicated sales lead in Q1 2025 after partnering with WarehouseOS?","relevant_slugs":["companies/acme-0"]},
+    {"id":"q13","query":"Which cybersecurity startup calls its product adaptive defense infrastructure and aims to reduce alert fatigue by 90 percent?","relevant_slugs":["companies/beta-1"]},
+    {"id":"q14","query":"Which Austin cybersecurity company signed a fourth design partner, a regional healthcare provider, in November 2024?","relevant_slugs":["companies/beta-1"]},
+    {"id":"q15","query":"Which fintech startup provides a lending-as-a-service API using transaction history and cash-flow patterns instead of traditional credit scores?","relevant_slugs":["companies/gamma-2"]},
+    {"id":"q16","query":"Which company announced a partnership with three unnamed e-commerce platforms in September 2024 while expanding beyond lending?","relevant_slugs":["companies/gamma-2"]},
+    {"id":"q17","query":"Which biotech startup develops protein-engineering platforms for rare genetic disorder therapies?","relevant_slugs":["companies/delta-3"]},
+    {"id":"q18","query":"Which biotech company published a preprint on novel protein-folding methodology in September 2023?","relevant_slugs":["companies/delta-3"]},
+    {"id":"q19","query":"Which developer-first security startup created ShieldScan for Kubernetes, AWS, and Azure environments?","relevant_slugs":["companies/epsilon-4"]},
+    {"id":"q20","query":"Which cloud-security company has more than 150 organizations using ShieldScan and added a SOC 2 and HIPAA compliance module?","relevant_slugs":["companies/epsilon-4"]},
+    {"id":"q21","query":"At which board meeting did Acme approve a 40 million dollar Series B target with investor outreach planned for February?","relevant_slugs":["meetings/board-acme-2025-q1-0"]},
+    {"id":"q22","query":"Which Acme board meeting discussed warehouse-robot demand exceeding production for three straight quarters without reaching a facility expansion decision?","relevant_slugs":["meetings/board-acme-2025-q1-0"]},
+    {"id":"q23","query":"What board meeting recorded Beta Q1 revenue of 4.2 million dollars, ARR of 18.1 million, and net revenue retention of 112 percent?","relevant_slugs":["meetings/board-beta-2025-q2-1"]},
+    {"id":"q24","query":"At which Beta board meeting did the founder recommend front-loading engineering hires even if sales expansion was delayed?","relevant_slugs":["meetings/board-beta-2025-q2-1"]},
+    {"id":"q25","query":"Which Gamma board meeting debated a 12 percent transaction-volume beat against stubbornly high SMB customer-acquisition costs?","relevant_slugs":["meetings/board-gamma-2025-q3-2"]},
+    {"id":"q26","query":"At which Gamma meeting did the board delay formal fundraising until Q4 because technical debt affected platform reliability?","relevant_slugs":["meetings/board-gamma-2025-q3-2"]},
+    {"id":"q27","query":"Which Delta board meeting compared a 67 percent Phase 2 tumor-reduction result with a 55 percent go-no-go threshold for Phase 3 planning?","relevant_slugs":["meetings/board-delta-2025-q4-3"]},
+    {"id":"q28","query":"At which Delta meeting did the board discuss a Series D target of 80 to 100 million dollars with 18 months of cash runway remaining?","relevant_slugs":["meetings/board-delta-2025-q4-3"]},
+    {"id":"q29","query":"Which Epsilon board meeting reviewed 18.2 million dollars of ARR, 84 percent year-over-year growth, and 72 percent gross margins?","relevant_slugs":["meetings/board-epsilon-2025-q1-4"]},
+    {"id":"q30","query":"At which Epsilon meeting did the board consider an SMB product tier and debt financing ahead of a possible Series C?","relevant_slugs":["meetings/board-epsilon-2025-q1-4"]},
+    {"id":"q31","query":"Which founder's product is a lightweight behavioral-analysis endpoint agent rather than a signature-matching system?","relevant_slugs":["people/victor-taylor-1"]},
+    {"id":"q32","query":"Which fintech founder personally onboarded the tenth paying customer and reached 15 thousand dollars in monthly recurring revenue in November 2023?","relevant_slugs":["people/mark-jones-2"]},
+    {"id":"q33","query":"Which Delta founder has a PhD in systems biology from Stanford and often co-authors papers with biotech researchers?","relevant_slugs":["people/victor-wilson-3"]},
+    {"id":"q34","query":"Which Epsilon founder announced the company's first profitable quarter internally in August 2024?","relevant_slugs":["people/paul-rodriguez-4"]},
+    {"id":"q35","query":"Which Acme founder announced a partnership with a major automotive supplier for custom integration work in November 2025?","relevant_slugs":["people/mia-brown-0"]}
   ]
 }

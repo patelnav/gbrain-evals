@@ -203,6 +203,7 @@ jobs:
         env:
           BENCHROUTER_REPO_FULL_NAME: patelnav/gbrain-evals
           BENCHROUTER_OIDC_AUDIENCE: benchrouter
+          GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
       - name: Run BenchRouter model pack
         if: github.event_name == 'workflow_dispatch'
         run: node .benchrouter/upload-results.mjs run-pack

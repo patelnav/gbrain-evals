@@ -10,17 +10,18 @@
  * Flow:
  *   1. Fixed corpus (15 existing world-v1 pages).
  *   2. Three modes: none, title, per_chunk_synopsis.
- *   3. Ten queries with gold slugs.
- *   4. For each (mode, query) measure Recall@1, Recall@5, and Recall@10.
- *   5. Report mode-vs-mode delta.
+ *   3. Grounded queries with gold slugs across people, companies, and meetings.
+ *   4. For each (mode, query) measure MRR and Recall@1, Recall@5, and Recall@10.
+ *   5. Report mode-vs-mode deltas.
  *
  * BenchRouter repository_executable mode (`--benchrouter` or
- * BENCHROUTER_EXEC_RESULT_PATH) runs only the routed synopsis path:
+ * BENCHROUTER_EXEC_RESULT_PATH) runs a fixed title baseline and the routed
+ * synopsis candidate:
  *   - Synopsis uses gbrain native Anthropic Messages via ANTHROPIC_BASE_URL
- *   - Outbound model is `anthropic:<route-id>` (unprefixed route id in body)
- *   - Forced candidate belongs only in BENCHROUTER_EVAL_HEADERS_JSON
+ *   - Outbound model is `anthropic:<route-id>` (the server binds the candidate)
+ *   - ANTHROPIC_API_KEY is the server-issued ephemeral eval token from the kit
  *   - Embeddings stay on google:gemini-embedding-001 at 1,536 dimensions
- *   - Captures x-benchrouter-model-call-id from /v1/messages responses only
+ *   - No fetch wrapper, client-forged headers, or echoed model-call IDs
  *   - Synopsis page_fallback fails the eval
  *   - Writes benchrouter.executable_result.v1 to result_path
  *
@@ -30,7 +31,8 @@
  *   bun eval/runner/cat26-contextual-retrieval.ts --validate
  */
 
-import { writeFileSync, mkdirSync, readFileSync } from 'fs';
+import { writeFileSync, mkdirSync, readFileSync, readdirSync } from 'fs';
+import { homedir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from 'gbrain/pglite-engine';
 import { importFromContent } from 'gbrain/import-file';
@@ -46,17 +48,19 @@ const ROUTE_ID = 'gbrain-evals/contextual-synopsis';
 const INCUMBENT_SYNOPSIS_MODEL = 'anthropic:claude-haiku-4-5-20251001';
 const EMBEDDING_MODEL = 'google:gemini-embedding-001';
 const EMBEDDING_DIM = 1536;
-const PRIMARY_METRIC = 'recall_at_1';
+const PRIMARY_METRIC = 'mrr';
 
 const MIN_PAGES = 12;
-const MIN_QUERIES = 8;
+const MIN_QUERIES = 24;
 const MIN_TOTAL_CHUNKS = 15;
-const MIN_CONTEXTUAL_GOLD_PAGES = 4;
+const MIN_CONTEXTUAL_GOLD_PAGES = 12;
+const MIN_MULTICHUNK_GOLD_PAGES = 4;
 
 interface CorpusPage {
   slug: string;
   title: string;
   body: string;
+  type: 'person' | 'company' | 'meeting';
 }
 
 interface CorpusFile {
@@ -68,6 +72,7 @@ interface CorpusFile {
 interface WorldPage {
   slug: string;
   title: string;
+  type: 'person' | 'company' | 'meeting';
   compiled_truth: string;
   timeline?: string;
 }
@@ -109,9 +114,11 @@ interface ModeResult {
   per_query_recall_at_1: number[];
   per_query_recall_at_5: number[];
   per_query_recall_at_10: number[];
+  per_query_mrr: number[];
   mean_recall_at_1: number;
   mean_recall_at_5: number;
   mean_recall_at_10: number;
+  mean_mrr: number;
 }
 
 interface Receipt {
@@ -123,6 +130,8 @@ interface Receipt {
   queries: number;
   modes: ModeResult[];
   best_mode: Mode;
+  title_vs_none_delta_mrr: number;
+  synopsis_vs_title_delta_mrr: number;
   none_vs_title_delta_at_5: number;
   none_vs_synopsis_delta_at_5: number;
   none_vs_title_delta_at_10: number;
@@ -133,7 +142,6 @@ interface BenchRouterExecutableResult {
   schema_version: 'benchrouter.executable_result.v1';
   primary_metric: { name: string; score: number };
   metrics: Record<string, number>;
-  model_call_ids: string[];
   observations: Array<{
     id: string;
     version: string;
@@ -188,10 +196,19 @@ function printHelp(): void {
     '  bun eval/runner/cat26-contextual-retrieval.ts --modes none,title\n\n' +
     'Flags:\n' +
     '  --validate       Check corpus, queries, eval-pack, and chunk invariants (no network)\n' +
-    '  --benchrouter    BenchRouter repository_executable mode (synopsis route only)\n' +
+    '  --benchrouter    BenchRouter repository_executable mode (title baseline + synopsis candidate)\n' +
     '  --result-path    Override benchrouter.executable_result.v1 output path\n' +
     '  --modes          Comma-separated modes (default: none,title,per_chunk_synopsis)\n',
   );
+}
+
+function validateModeList(modes: Mode[]): void {
+  const allowed = new Set<Mode>(['none', 'title', 'per_chunk_synopsis']);
+  if (modes.length === 0) throw new Error('--modes must include at least one mode');
+  if (new Set(modes).size !== modes.length) throw new Error('--modes must not contain duplicates');
+  for (const mode of modes) {
+    if (!allowed.has(mode)) throw new Error(`unknown contextual retrieval mode: ${mode}`);
+  }
 }
 
 function loadCorpus(): LoadedCorpus {
@@ -204,10 +221,14 @@ function loadCorpus(): LoadedCorpus {
     if (!page.slug?.trim() || !page.title?.trim() || !page.compiled_truth?.trim()) {
       throw new Error(`${ref}: expected slug, title, and compiled_truth`);
     }
+    if (page.type !== 'person' && page.type !== 'company' && page.type !== 'meeting') {
+      throw new Error(`${ref}: expected a person, company, or meeting fixture (got ${String(page.type)})`);
+    }
     const timeline = page.timeline?.trim();
     return {
       slug: page.slug,
       title: page.title,
+      type: page.type,
       body: timeline
         ? `${page.compiled_truth}\n\n## Timeline\n\n${timeline}`
         : page.compiled_truth,
@@ -237,75 +258,36 @@ function normalizeAnthropicBaseUrl(raw: string): string {
   return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
 }
 
-function resolveUrl(input: RequestInfo | URL): string {
-  if (typeof input === 'string') return input;
-  if (input instanceof URL) return input.href;
-  return input.url;
-}
-
-function parseEvalHeaders(): Record<string, string> {
-  const headersJson = process.env.BENCHROUTER_EVAL_HEADERS_JSON;
-  if (!headersJson) return {};
-  const parsed = JSON.parse(headersJson) as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('BENCHROUTER_EVAL_HEADERS_JSON must be a JSON object');
-  }
-  return parsed as Record<string, string>;
-}
-
-const modelCallIds: string[] = [];
 let benchRouterRoutingInstalled = false;
 
 /**
- * BenchRouter synopsis routing preserves native Anthropic Messages:
- * ANTHROPIC_BASE_URL → eval base; outbound model stays anthropic:<route-id>.
- * Embeddings retain the gateway's fixed Google configuration and receive no
- * BenchRouter eval headers.
+ * Configure native Anthropic routing for the repository executable. The kit
+ * exposes the server-issued model-call token as an environment value. The
+ * token is used as the normal SDK API key, so the server owns route and call
+ * attribution without a client-side fetch or response-header shim.
  */
 function installBenchRouterSynopsisRouting(): void {
   if (benchRouterRoutingInstalled) return;
-  benchRouterRoutingInstalled = true;
 
   const evalBaseRaw = process.env.BENCHROUTER_EVAL_BASE_URL?.trim();
   if (!evalBaseRaw) {
     throw new Error('BENCHROUTER_EVAL_BASE_URL is required in --benchrouter mode');
   }
   const evalBaseUrl = normalizeAnthropicBaseUrl(evalBaseRaw);
-  const evalOrigin = new URL(evalBaseUrl).origin;
-
   process.env.ANTHROPIC_BASE_URL = evalBaseUrl;
-  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
-    process.env.ANTHROPIC_API_KEY = 'benchrouter-eval-dummy';
+  const evalToken = process.env.BENCHROUTER_API_KEY?.trim();
+  if (!evalToken || !evalToken.startsWith('ecall_')) {
+    throw new Error(
+      'BenchRouter mode requires the server-issued ecall_ token in BENCHROUTER_API_KEY',
+    );
   }
-
-  const evalHeaders = parseEvalHeaders();
-  const originalFetch = globalThis.fetch.bind(globalThis);
-
-  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const requestUrl = new URL(resolveUrl(input));
-    const isAnthropicMessages =
-      requestUrl.origin === evalOrigin && requestUrl.pathname === '/v1/messages';
-
-    if (!isAnthropicMessages) {
-      return originalFetch(input, init);
-    }
-
-    const headers = new Headers(init?.headers);
-    for (const [key, value] of Object.entries(evalHeaders)) {
-      if (typeof value === 'string' && value.length > 0) headers.set(key, value);
-    }
-    const response = await originalFetch(input, { ...init, headers });
-    const callId = response.headers.get('x-benchrouter-model-call-id');
-    if (callId && !modelCallIds.includes(callId)) {
-      modelCallIds.push(callId);
-    }
-    return response;
-  };
+  process.env.ANTHROPIC_API_KEY = evalToken;
+  benchRouterRoutingInstalled = true;
 }
 
 /**
- * Outbound synopsis model for BenchRouter: anthropic transport + route id body.
- * BENCHROUTER_FORCE_MODEL is never used here — forced candidate belongs in headers.
+ * Outbound synopsis model for BenchRouter: Anthropic transport + route id body.
+ * Candidate identity is bound by the server-issued eval token.
  */
 function resolveSynopsisModel(benchrouter: boolean): string {
   if (benchrouter) {
@@ -340,12 +322,13 @@ function toRankedDocs(results: Array<{ slug: string; score?: number }>): RankedD
 async function importFixturePages(
   engine: PGLiteEngine,
   pages: CorpusPage[],
+  opts: { noEmbed: boolean },
 ): Promise<FixtureStats> {
   const perPageChunks: Record<string, number> = {};
   let totalChunks = 0;
   for (const page of pages) {
     const body = `# ${page.title}\n\n${page.body}\n`;
-    const imported = await importFromContent(engine, page.slug, body, { noEmbed: true });
+    const imported = await importFromContent(engine, page.slug, body, { noEmbed: opts.noEmbed });
     if (imported.status !== 'imported') {
       throw new Error(
         `fixture import failed for ${page.slug}: ${imported.status}${imported.error ? ` (${imported.error})` : ''}`,
@@ -370,7 +353,7 @@ async function measureFixtureChunks(pages: CorpusPage[]): Promise<FixtureStats> 
   try {
     await engine.connect({});
     await engine.initSchema();
-    return await importFixturePages(engine, pages);
+    return await importFixturePages(engine, pages, { noEmbed: true });
   } finally {
     await engine.disconnect();
   }
@@ -450,11 +433,22 @@ function validateFixtureInvariants(pages: CorpusPage[], queries: QuerySpec[], st
       `contextual retrieval needs at least ${MIN_CONTEXTUAL_GOLD_PAGES} unique gold pages (got ${goldPages.size})`,
     );
   }
-  for (const slug of goldPages) {
-    const chunkCount = stats.perPageChunks[slug] ?? 0;
-    if (chunkCount < 2) {
-      throw new Error(`contextual retrieval gold page ${slug} must span at least two chunks (got ${chunkCount})`);
+  const goldTypes = new Set(
+    pages.filter((page) => goldPages.has(page.slug)).map((page) => page.type),
+  );
+  for (const requiredType of ['person', 'company', 'meeting'] as const) {
+    if (!goldTypes.has(requiredType)) {
+      throw new Error(`queries must include a gold page of type ${requiredType}`);
     }
+  }
+  const multichunkGoldPages = [...goldPages].filter(
+    (slug) => (stats.perPageChunks[slug] ?? 0) >= 2,
+  );
+  if (multichunkGoldPages.length < MIN_MULTICHUNK_GOLD_PAGES) {
+    throw new Error(
+      `contextual retrieval needs at least ${MIN_MULTICHUNK_GOLD_PAGES} multi-chunk gold pages ` +
+      `(got ${multichunkGoldPages.length})`,
+    );
   }
 }
 
@@ -467,12 +461,65 @@ function validateSynopsisModelRouting(benchrouter: boolean): void {
   if (benchrouter && modelId !== ROUTE_ID) {
     throw new Error(`benchrouter synopsis model must be anthropic:${ROUTE_ID} (got ${model})`);
   }
-  if (benchrouter && process.env.BENCHROUTER_FORCE_MODEL) {
-    const forced = process.env.BENCHROUTER_FORCE_MODEL;
-    if (model.includes(forced) || forced.includes(modelId)) {
-      throw new Error('BENCHROUTER_FORCE_MODEL must not appear in synopsis model; use eval headers only');
+}
+
+/**
+ * gbrain records synopsis failures in bounded JSONL audit events. Read only
+ * the latest matching events so a transport failure remains diagnosable while
+ * the evaluator keeps contract validity separate from retrieval quality.
+ */
+function readSynopsisAuditDetail(pageSlug: string): string {
+  const auditDir = process.env.GBRAIN_AUDIT_DIR?.trim() || join(homedir(), '.gbrain', 'audit');
+  let files: string[];
+  try {
+    files = readdirSync(auditDir)
+      .filter((name) => name.startsWith('synopsis-failures-') && name.endsWith('.jsonl'))
+      .sort()
+      .slice(-2);
+  } catch {
+    return '';
+  }
+  const events: string[] = [];
+  for (const file of files) {
+    let lines: string[];
+    try {
+      lines = readFileSync(join(auditDir, file), 'utf8').split('\n');
+    } catch {
+      continue;
+    }
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line) as {
+          page_slug?: unknown;
+          chunk_index?: unknown;
+          kind?: unknown;
+          detail?: unknown;
+        };
+        if (event.page_slug !== pageSlug) continue;
+        const kind = typeof event.kind === 'string' ? event.kind : 'unknown';
+        const chunk = Number.isInteger(event.chunk_index) ? `chunk=${event.chunk_index} ` : '';
+        const detail = typeof event.detail === 'string' ? event.detail.slice(0, 200) : '';
+        events.push(`${chunk}${kind}${detail ? `: ${detail}` : ''}`);
+      } catch {
+        // The audit file is best-effort diagnostic context.
+      }
     }
   }
+  return events.slice(-3).join(' | ');
+}
+
+function synopsisFailureDetail(pageSlug: string, kind: string, detail?: string): string {
+  const audit = readSynopsisAuditDetail(pageSlug);
+  const direct = detail ? ` detail=${detail.slice(0, 200)}` : '';
+  const auditText = audit ? ` audit=${audit}` : '';
+  const transportEvidence = `${detail ?? ''} ${audit}`;
+  const label = kind === 'malformed' &&
+      /fetch|network|transport|socket|econn|timeout|connection|502|503|504/i.test(transportEvidence)
+    ? 'unknown_transport'
+    : kind;
+  const classification = label === kind ? '' : ` gbrain_classification=${kind}`;
+  return `gbrain_failure_class=${label}${classification}${direct}${auditText}`;
 }
 
 async function validateFixedInputs(
@@ -500,9 +547,10 @@ async function validateFixedInputs(
   return stats;
 }
 
-async function applySynopsisReembed(
+async function applyContextualReembed(
   engine: PGLiteEngine,
   pages: CorpusPage[],
+  mode: Mode,
   synopsisModel: string,
   benchrouter: boolean,
 ): Promise<void> {
@@ -511,23 +559,35 @@ async function applySynopsisReembed(
       engine,
       pageSlug: page.slug,
       sourceId: 'default',
-      globalMode: 'per_chunk_synopsis',
-      synopsisModel,
+      globalMode: mode,
+      ...(mode === 'per_chunk_synopsis' ? { synopsisModel } : {}),
     });
     if (result.kind === 'transient_error' || result.kind === 'permanent_error') {
       throw new Error(
-        `synopsis re-embed failed for ${page.slug}: ${result.kind} ${result.detail}`,
+        `synopsis re-embed contract/transport failure for ${page.slug}: ` +
+        synopsisFailureDetail(page.slug, result.cause, result.detail),
       );
     }
     if (result.kind === 'page_fallback') {
       throw new Error(
-        `synopsis re-embed fell back for ${page.slug}: ${result.mode_attempted} → ${result.mode_applied} (${result.fallback_kind})`,
+        `synopsis re-embed contract/transport fallback for ${page.slug}: ` +
+        `${result.mode_attempted} -> ${result.mode_applied} ` +
+        `(${synopsisFailureDetail(page.slug, result.fallback_kind)})`,
       );
     }
     if (benchrouter && result.kind !== 'success') {
       throw new Error(`unexpected synopsis result for ${page.slug}: ${result.kind}`);
     }
   }
+}
+
+function mean(values: number[]): number {
+  return values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+}
+
+function reciprocalRank(docs: RankedDoc[], relevant: Set<string>): number {
+  const rank = docs.findIndex((doc) => relevant.has(doc.page_id));
+  return rank < 0 ? 0 : 1 / (rank + 1);
 }
 
 async function runMode(
@@ -549,22 +609,21 @@ async function runMode(
     console.log = () => {};
 
     await engine.setConfig('contextual_retrieval', mode);
-    const fixtureStats = await importFixturePages(engine, pages);
-    const expectedCalls = fixtureStats.totalChunks;
-    const callsBefore = modelCallIds.length;
-
-    if (mode === 'per_chunk_synopsis') {
-      await applySynopsisReembed(engine, pages, resolveSynopsisModel(benchrouter), benchrouter);
-    }
-    if (benchrouter && modelCallIds.length - callsBefore !== expectedCalls) {
-      throw new Error(
-        `expected ${expectedCalls} BenchRouter synopsis calls, captured ${modelCallIds.length - callsBefore}`,
+    await importFixturePages(engine, pages, { noEmbed: mode !== 'none' });
+    if (mode !== 'none') {
+      await applyContextualReembed(
+        engine,
+        pages,
+        mode,
+        resolveSynopsisModel(benchrouter),
+        benchrouter,
       );
     }
 
     const perQ1: number[] = [];
     const perQ5: number[] = [];
     const perQ10: number[] = [];
+    const perQmrr: number[] = [];
     for (const q of queries) {
       const results = await hybridSearch(engine, q.query, { limit: 30 } as any);
       const docs = toRankedDocs(results as Array<{ slug: string; score?: number }>).slice(0, 10);
@@ -572,6 +631,7 @@ async function runMode(
       perQ1.push(recallAtK(docs, rel, 1));
       perQ5.push(recallAtK(docs, rel, 5));
       perQ10.push(recallAtK(docs, rel, 10));
+      perQmrr.push(reciprocalRank(docs, rel));
     }
 
     return {
@@ -579,9 +639,11 @@ async function runMode(
       per_query_recall_at_1: perQ1,
       per_query_recall_at_5: perQ5,
       per_query_recall_at_10: perQ10,
-      mean_recall_at_1: perQ1.reduce((a, b) => a + b, 0) / Math.max(1, perQ1.length),
-      mean_recall_at_5: perQ5.reduce((a, b) => a + b, 0) / Math.max(1, perQ5.length),
-      mean_recall_at_10: perQ10.reduce((a, b) => a + b, 0) / Math.max(1, perQ10.length),
+      per_query_mrr: perQmrr,
+      mean_recall_at_1: mean(perQ1),
+      mean_recall_at_5: mean(perQ5),
+      mean_recall_at_10: mean(perQ10),
+      mean_mrr: mean(perQmrr),
     };
   } finally {
     console.log = origLog;
@@ -591,37 +653,44 @@ async function runMode(
 
 function writeBenchRouterResult(
   resultPath: string,
+  baseline: ModeResult,
   synopsis: ModeResult,
   queries: QuerySpec[],
 ): void {
+  const mrrLift = synopsis.mean_mrr - baseline.mean_mrr;
   mkdirSync(join(process.cwd(), '.benchrouter'), { recursive: true });
   const observations = queries.map((q, idx) => ({
     id: q.id,
     version: '1',
     critical: false,
-    pass: (synopsis.per_query_recall_at_1[idx] ?? 0) > 0,
-    score: synopsis.per_query_recall_at_1[idx] ?? 0,
+    pass: (synopsis.per_query_mrr[idx] ?? 0) > 0,
+    score: synopsis.per_query_mrr[idx] ?? 0,
   }));
   const payload: BenchRouterExecutableResult = {
     schema_version: 'benchrouter.executable_result.v1',
     primary_metric: {
       name: PRIMARY_METRIC,
-      score: synopsis.mean_recall_at_1,
+      score: synopsis.mean_mrr,
     },
     metrics: {
-      recall_at_1: synopsis.mean_recall_at_1,
-      recall_at_5: synopsis.mean_recall_at_5,
-      recall_at_10: synopsis.mean_recall_at_10,
+      candidate_mrr: synopsis.mean_mrr,
+      baseline_mrr: baseline.mean_mrr,
+      candidate_recall_at_1: synopsis.mean_recall_at_1,
+      candidate_recall_at_5: synopsis.mean_recall_at_5,
+      candidate_recall_at_10: synopsis.mean_recall_at_10,
+      baseline_recall_at_1: baseline.mean_recall_at_1,
+      baseline_recall_at_5: baseline.mean_recall_at_5,
+      baseline_recall_at_10: baseline.mean_recall_at_10,
     },
-    model_call_ids: [...modelCallIds],
     observations,
   };
   writeFileSync(resultPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
   process.stderr.write(`[cat26] benchrouter result: ${resultPath}\n`);
-  process.stderr.write(`[cat26]   ${PRIMARY_METRIC}=${(synopsis.mean_recall_at_1 * 100).toFixed(1)}%\n`);
-  process.stderr.write(`[cat26]   recall_at_5=${(synopsis.mean_recall_at_5 * 100).toFixed(1)}%\n`);
-  process.stderr.write(`[cat26]   recall_at_10=${(synopsis.mean_recall_at_10 * 100).toFixed(1)}%\n`);
-  process.stderr.write(`[cat26]   model_call_ids=${modelCallIds.length}\n`);
+  process.stderr.write(`[cat26]   candidate_mrr=${(synopsis.mean_mrr * 100).toFixed(1)}%\n`);
+  process.stderr.write(`[cat26]   baseline_mrr=${(baseline.mean_mrr * 100).toFixed(1)}%\n`);
+  process.stderr.write(`[cat26]   signed_mrr_lift=${(mrrLift * 100).toFixed(1)} points\n`);
+  process.stderr.write(`[cat26]   candidate_recall_at_5=${(synopsis.mean_recall_at_5 * 100).toFixed(1)}%\n`);
+  process.stderr.write(`[cat26]   candidate_recall_at_10=${(synopsis.mean_recall_at_10 * 100).toFixed(1)}%\n`);
 }
 
 async function main(): Promise<void> {
@@ -635,6 +704,7 @@ async function main(): Promise<void> {
   const pages = corpus.pages;
   const queries = loadQueries();
   const pack = loadEvalPack();
+  validateModeList(args.modes);
 
   if (args.validate) {
     const stats = await validateFixedInputs(pack, pages, corpus.pageRefs, queries, args.benchrouter);
@@ -642,6 +712,7 @@ async function main(): Promise<void> {
     process.stderr.write(`[cat26]   corpus pages: ${pages.length}\n`);
     process.stderr.write(`[cat26]   queries: ${queries.length}\n`);
     process.stderr.write(`[cat26]   total chunks: ${stats.totalChunks}\n`);
+    process.stderr.write(`[cat26]   modes: ${args.modes.join(',')}\n`);
     process.stderr.write(`[cat26]   expected synopsis calls: ${stats.totalChunks}\n`);
     process.stderr.write(`[cat26]   eval-pack max_model_calls: ${pack.max_model_calls}\n`);
     process.stderr.write(`[cat26]   synopsis model: ${resolveSynopsisModel(args.benchrouter)}\n`);
@@ -655,7 +726,18 @@ async function main(): Promise<void> {
     return;
   }
 
-  const modes = args.benchrouter ? (['per_chunk_synopsis'] as Mode[]) : args.modes;
+  const fixtureStats = await measureFixtureChunks(pages);
+  validateQueries(queries, pages);
+  validateFixtureInvariants(pages, queries, fixtureStats);
+  if (fixtureStats.totalChunks > pack.max_model_calls) {
+    throw new Error(
+      `fixture needs ${fixtureStats.totalChunks} synopsis calls but eval-pack max_model_calls is ${pack.max_model_calls}`,
+    );
+  }
+
+  const modes = args.benchrouter
+    ? (['title', 'per_chunk_synopsis'] as Mode[])
+    : args.modes;
   process.stderr.write(
     `[cat26] testing ${pages.length} pages × ${queries.length} queries × ${modes.length} mode(s)...\n`,
   );
@@ -663,28 +745,23 @@ async function main(): Promise<void> {
   const results: ModeResult[] = [];
   for (const mode of modes) {
     process.stderr.write(`[cat26]   mode=${mode}...\n`);
-    const r = await runMode(mode, pages, queries, args.benchrouter);
+    const r = await runMode(mode, pages, queries, args.benchrouter && mode === 'per_chunk_synopsis');
     results.push(r);
     process.stderr.write(
-      `[cat26]   mode=${mode} mean R@1=${(r.mean_recall_at_1 * 100).toFixed(1)}% ` +
+      `[cat26]   mode=${mode} mean MRR=${(r.mean_mrr * 100).toFixed(1)}% ` +
+      `R@1=${(r.mean_recall_at_1 * 100).toFixed(1)}% ` +
       `R@5=${(r.mean_recall_at_5 * 100).toFixed(1)}% ` +
       `R@10=${(r.mean_recall_at_10 * 100).toFixed(1)}%\n`,
     );
   }
 
   if (args.benchrouter) {
+    const baseline = results.find(r => r.mode === 'title');
     const synopsis = results.find(r => r.mode === 'per_chunk_synopsis');
+    if (!baseline) throw new Error('benchrouter mode requires title baseline result');
     if (!synopsis) throw new Error('benchrouter mode requires per_chunk_synopsis result');
-    if (modelCallIds.length === 0) {
-      throw new Error('benchrouter mode produced no model_call_ids; synopsis calls did not pass through BenchRouter');
-    }
-    if (modelCallIds.length > pack.max_model_calls) {
-      throw new Error(
-        `synopsis model calls (${modelCallIds.length}) exceed eval-pack max_model_calls (${pack.max_model_calls})`,
-      );
-    }
     const resultPath = args.resultPath ?? pack.result_path;
-    writeBenchRouterResult(resultPath, synopsis, queries);
+    writeBenchRouterResult(resultPath, baseline, synopsis, queries);
     return;
   }
 
@@ -695,7 +772,7 @@ async function main(): Promise<void> {
   } catch { /* best-effort */ }
 
   const bestMode = results.reduce((a, b) =>
-    a.mean_recall_at_10 >= b.mean_recall_at_10 ? a : b,
+    a.mean_mrr >= b.mean_mrr ? a : b,
   ).mode;
   const noneR = results.find(r => r.mode === 'none');
   const titleR = results.find(r => r.mode === 'title');
@@ -710,6 +787,8 @@ async function main(): Promise<void> {
     queries: queries.length,
     modes: results,
     best_mode: bestMode,
+    title_vs_none_delta_mrr: (titleR?.mean_mrr ?? 0) - (noneR?.mean_mrr ?? 0),
+    synopsis_vs_title_delta_mrr: (synR?.mean_mrr ?? 0) - (titleR?.mean_mrr ?? 0),
     none_vs_title_delta_at_5: (titleR?.mean_recall_at_5 ?? 0) - (noneR?.mean_recall_at_5 ?? 0),
     none_vs_synopsis_delta_at_5: (synR?.mean_recall_at_5 ?? 0) - (noneR?.mean_recall_at_5 ?? 0),
     none_vs_title_delta_at_10: (titleR?.mean_recall_at_10 ?? 0) - (noneR?.mean_recall_at_10 ?? 0),
@@ -725,6 +804,7 @@ async function main(): Promise<void> {
   for (const r of results) {
     process.stderr.write(
       `[cat26]   mode=${r.mode.padEnd(22)} ` +
+      `MRR=${(r.mean_mrr * 100).toFixed(1)}% ` +
       `R@1=${(r.mean_recall_at_1 * 100).toFixed(1)}% ` +
       `R@5=${(r.mean_recall_at_5 * 100).toFixed(1)}% ` +
       `R@10=${(r.mean_recall_at_10 * 100).toFixed(1)}%\n`,

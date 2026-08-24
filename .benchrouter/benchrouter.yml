@@ -31,7 +31,7 @@ routes:
       runtime_version: "1.3.6"
       lockfile: "bun.lock"
       result_path: ".benchrouter/executable-result.json"
-      primary_metric: "recall_at_1"
+      primary_metric: "mrr"
       max_model_calls: 24
       max_cost_usd: 15
       max_cost_per_call_usd: 1

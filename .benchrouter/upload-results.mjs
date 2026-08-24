@@ -1074,11 +1074,10 @@ function executableChildEnv(route, runtimeEnv, includeSecrets = true) {
   const env = {};
   for (const [name, value] of Object.entries(runtimeEnv)) if (allowed.has(name) && typeof value === "string") env[name] = value;
   env.BENCHROUTER_ROUTE_ID = runtimeEnv.BENCHROUTER_ROUTE_ID;
-  env.BENCHROUTER_RESULT_SET_ID = runtimeEnv.BENCHROUTER_RESULT_SET_ID;
-  env.BENCHROUTER_MODEL_RUN_ID = runtimeEnv.BENCHROUTER_MODEL_RUN_ID;
-  env.BENCHROUTER_FORCE_MODEL = runtimeEnv.BENCHROUTER_MODEL_ID;
+  // Repository-executable evaluators use the native SDK credential slot.
+  // BenchRouter derives route, model, and run context from this ephemeral token.
+  env.BENCHROUTER_API_KEY = runtimeEnv.BENCHROUTER_EVAL_CALL_TOKEN_MODEL;
   env.BENCHROUTER_EVAL_BASE_URL = String(runtimeEnv.BENCHROUTER_API_URL || "");
-  env.BENCHROUTER_EVAL_HEADERS_JSON = JSON.stringify({ "x-benchrouter-result-set-id": runtimeEnv.BENCHROUTER_RESULT_SET_ID, "x-benchrouter-model-run-id": runtimeEnv.BENCHROUTER_MODEL_RUN_ID, "x-benchrouter-eval-call-token": runtimeEnv.BENCHROUTER_EVAL_CALL_TOKEN_MODEL, "x-benchrouter-force-model": runtimeEnv.BENCHROUTER_MODEL_ID });
   if (route.baseUrlEnv) env[route.baseUrlEnv] = env.BENCHROUTER_EVAL_BASE_URL;
   return env;
 }
@@ -1180,12 +1179,12 @@ async function uploadExecutableResults(apiUrl, runtimeEnv, route, uploadToken, r
   if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) throw new Error("Executable result receipt must be an object");
   const primary = receipt.primary_metric;
   if (!primary || primary.name !== route.executable.primaryMetric || typeof primary.score !== "number" || !Number.isFinite(primary.score) || primary.score < 0 || primary.score > 1) throw new Error("Executable result receipt has an invalid primary metric");
-  const ids = Array.isArray(receipt.model_call_ids) ? receipt.model_call_ids.filter((value) => typeof value === "string" && value.length > 0) : [];
-  if (ids.length === 0 || new Set(ids).size !== ids.length) throw new Error("Executable result receipt must include unique model_call_ids");
   const observations = Array.isArray(receipt.observations) ? receipt.observations : [];
   const results = observations.map((entry, index) => ({ case_id: String(entry.id || index + 1), case_version: String(entry.version || "1"), critical: entry.critical === true, model: runtimeEnv.BENCHROUTER_MODEL_ID, selected_model: runtimeEnv.BENCHROUTER_MODEL_ID, model_call_ids: [], pass: entry.pass === true, score: typeof entry.score === "number" ? entry.score : entry.pass === true ? 1 : 0 }));
   const fingerprint = await buildFingerprint(results, runtimeEnv);
-  const response = await fetch(apiUrl + "/v1/eval-model-runs/" + encodeURIComponent(modelRunId) + "/results", { method: "POST", headers: { authorization: "Bearer " + uploadToken, "content-type": "application/json" }, body: JSON.stringify({ result_set_id: resultSetId, action: "run", fingerprint, model_call_ids: ids, quality: { primary_metric: primary, metrics: receipt.metrics || {} }, results }) });
+  // The server derives the candidate model-call set from durable request rows.
+  // Do not require the evaluator to echo response-header IDs.
+  const response = await fetch(apiUrl + "/v1/eval-model-runs/" + encodeURIComponent(modelRunId) + "/results", { method: "POST", headers: { authorization: "Bearer " + uploadToken, "content-type": "application/json" }, body: JSON.stringify({ result_set_id: resultSetId, action: "run", fingerprint, quality: { primary_metric: primary, metrics: receipt.metrics || {} }, results }) });
   if (!response.ok) throw new Error("BenchRouter executable result upload failed (" + response.status + " ): " + (await response.text()).slice(0, 500));
 }
 
