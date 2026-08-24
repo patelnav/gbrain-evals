@@ -148,6 +148,7 @@ function parseBenchRouterManifest(yamlText, configPath) {
     const mode = entry.eval_pack.mode === "repository_executable" ? "repository_executable" : "isolated_replay";
     const executable = mode === "repository_executable" ? {
       argv: requiredManifestStringList(entry.eval_pack.argv, prefix + ".eval_pack.argv"),
+      apiFamily: requiredManifestString(entry.eval_pack.api_family, prefix + ".eval_pack.api_family"),
       runtime: requiredManifestString(entry.eval_pack.runtime, prefix + ".eval_pack.runtime"),
       runtimeVersion: requiredExactRuntimeVersion(entry.eval_pack.runtime_version, prefix + ".eval_pack.runtime_version"),
       lockfile: requiredManifestRepoPath(entry.eval_pack.lockfile, prefix + ".eval_pack.lockfile"),
@@ -161,6 +162,7 @@ function parseBenchRouterManifest(yamlText, configPath) {
       timeoutMinutes: requiredManifestPositiveInteger(entry.eval_pack.timeout_minutes, prefix + ".eval_pack.timeout_minutes"),
       secretEnv: Array.isArray(entry.eval_pack.secret_env) ? requiredManifestUniqueList(entry.eval_pack.secret_env, prefix + ".eval_pack.secret_env") : []
     } : null;
+    if (executable && executable.apiFamily !== "openai_chat_completions" && executable.apiFamily !== "anthropic_messages" && executable.apiFamily !== "openai_responses") throw new Error(prefix + ".eval_pack.api_family must be openai_chat_completions, anthropic_messages, or openai_responses");
     if (executable && executable.runtime !== "node" && executable.runtime !== "bun") throw new Error(prefix + ".eval_pack.runtime must be node or bun");
     if (executable && executable.runtime === "bun" && executable.lockfile !== "bun.lock" && executable.lockfile !== "bun.lockb") throw new Error(prefix + ".eval_pack.lockfile must be bun.lock or bun.lockb for Bun");
     if (executable && executable.runtime === "node" && executable.lockfile !== "package-lock.json" && executable.lockfile !== "npm-shrinkwrap.json") throw new Error(prefix + ".eval_pack.lockfile must be package-lock.json or npm-shrinkwrap.json for Node");
@@ -753,12 +755,14 @@ async function buildExecutableSnapshotRoute(route, configPath) {
   const acceptanceHashes = await hashDeclaredRefs(executable.acceptanceRefs);
   const lockfileSha = await hashFile(executable.lockfile);
   const codeRefHashes = await hashDeclaredRefs(route.codeRefs || []);
-  const executionContract = { mode: route.evalMode, argv: executable.argv, runtime: executable.runtime, runtime_version: executable.runtimeVersion, lockfile: executable.lockfile, lockfile_sha256: lockfileSha, result_schema: route.resultSchema, result_path: executable.resultPath, primary_metric: executable.primaryMetric, max_model_calls: executable.maxModelCalls, max_cost_usd: executable.maxCostUsd, max_cost_per_call_usd: executable.maxCostPerCallUsd, timeout_minutes: executable.timeoutMinutes, secret_env: executable.secretEnv };
+  const executionContract = { mode: route.evalMode, api_family: executable.apiFamily, argv: executable.argv, runtime: executable.runtime, runtime_version: executable.runtimeVersion, lockfile: executable.lockfile, lockfile_sha256: lockfileSha, result_schema: route.resultSchema, result_path: executable.resultPath, primary_metric: executable.primaryMetric, max_model_calls: executable.maxModelCalls, max_cost_usd: executable.maxCostUsd, max_cost_per_call_usd: executable.maxCostPerCallUsd, timeout_minutes: executable.timeoutMinutes, secret_env: executable.secretEnv };
   const inputFp = hashString(canonicalJson({ route_id: route.routeId, execution: executionContract, input_refs: inputHashes, code_refs: codeRefHashes }));
   const acceptanceFp = hashString(canonicalJson({ primary_metric: executable.primaryMetric, acceptance_refs: acceptanceHashes }));
   const caseSetSha = hashString(canonicalJson(inputHashes));
   const scorerSha = hashString(canonicalJson(acceptanceHashes));
-  return { route_id: route.routeId, route_slug: route.slug, name: route.name, best_model: route.bestModel, eval_fingerprint: hashString(inputFp + ":" + acceptanceFp), input_fingerprint: inputFp, acceptance_fingerprint: acceptanceFp, config_sha256: await hashFile(configPath), scorer_sha256: scorerSha, case_set_sha256: caseSetSha, code_refs_sha256: hashString(canonicalJson(codeRefHashes)), covered_refs_sha256: hashString(canonicalJson([...inputHashes, ...acceptanceHashes, ...codeRefHashes])), case_count: 0, eval_command: route.evalCommand, result_schema: route.resultSchema, scorer_path: executable.acceptanceRefs[0], cases_path: executable.inputRefs[0], workflow_path: route.workflowPath, code_refs: route.codeRefs || [], code_ref_hashes: codeRefHashes, api_family: null, required_parameters: null, eval_pack: route.evalPack, metadata: { eval_archetype: route.evalArchetype || "", base_url_env: route.baseUrlEnv || "", provider_id: route.providerId || "", provider_ref: route.providerRef || "", observed_model: "" } };
+  const envelope = { api_families: [executable.apiFamily], semantic_controls: [], features: [], input_kinds: ["input.text"], output_kinds: ["text"], protocol_headers: {} };
+  const envelopeContentHash = hashString(canonicalJson(envelope));
+  return { route_id: route.routeId, route_slug: route.slug, name: route.name, best_model: route.bestModel, eval_fingerprint: hashString(inputFp + ":" + acceptanceFp), input_fingerprint: inputFp, acceptance_fingerprint: acceptanceFp, config_sha256: await hashFile(configPath), scorer_sha256: scorerSha, case_set_sha256: caseSetSha, code_refs_sha256: hashString(canonicalJson(codeRefHashes)), covered_refs_sha256: hashString(canonicalJson([...inputHashes, ...acceptanceHashes, ...codeRefHashes])), case_count: 0, eval_command: route.evalCommand, result_schema: route.resultSchema, scorer_path: executable.acceptanceRefs[0], cases_path: executable.inputRefs[0], workflow_path: route.workflowPath, code_refs: route.codeRefs || [], code_ref_hashes: codeRefHashes, required_parameters: [], api_families: envelope.api_families, semantic_controls: envelope.semantic_controls, features: envelope.features, input_kinds: envelope.input_kinds, output_kinds: envelope.output_kinds, protocol_headers: envelope.protocol_headers, envelope_content_hash: envelopeContentHash, eval_pack: route.evalPack, metadata: { eval_archetype: route.evalArchetype || "", base_url_env: route.baseUrlEnv || "", provider_id: route.providerId || "", provider_ref: route.providerRef || "", observed_model: "" } };
 }
 
 async function hashDeclaredRefs(refs) {
@@ -1214,7 +1218,7 @@ async function buildFingerprint(results, runtimeEnv = process.env) {
   const resultSchema = requiredString(runtimeEnv.BENCHROUTER_RESULT_SCHEMA, "BENCHROUTER_RESULT_SCHEMA");
   if (runtimeEnv.BENCHROUTER_EVAL_MODE === "repository_executable") {
     const route = await runtimeRoute(runtimeEnv);
-    return { commit_sha: await git(["rev-parse", "HEAD"]), config_path: configPath, config_sha256: await hashFile(configPath), eval_command: evalCommand, result_schema: resultSchema, execution_mode: route.evalMode, lockfile_sha256: await hashFile(route.executable.lockfile), input_refs: await hashDeclaredRefs(route.executable.inputRefs), acceptance_refs: await hashDeclaredRefs(route.executable.acceptanceRefs), runner: { benchrouter_ci_kit_version: BENCHROUTER_CI_KIT_VERSION, github_job: process.env.GITHUB_JOB || "", runner_os: process.env.RUNNER_OS || "", node: process.version } };
+    return { commit_sha: await git(["rev-parse", "HEAD"]), config_path: configPath, config_sha256: await hashFile(configPath), eval_command: evalCommand, result_schema: resultSchema, execution_mode: route.evalMode, api_family: route.executable.apiFamily, lockfile_sha256: await hashFile(route.executable.lockfile), input_refs: await hashDeclaredRefs(route.executable.inputRefs), acceptance_refs: await hashDeclaredRefs(route.executable.acceptanceRefs), runner: { benchrouter_ci_kit_version: BENCHROUTER_CI_KIT_VERSION, github_job: process.env.GITHUB_JOB || "", runner_os: process.env.RUNNER_OS || "", node: process.version } };
   }
   const scorerPath = requiredString(runtimeEnv.BENCHROUTER_SCORER_PATH, "BENCHROUTER_SCORER_PATH");
   return {

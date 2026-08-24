@@ -27,6 +27,7 @@ routes:
       command: "bun run eval:contextual-synopsis"
       capture_command: "npm run benchrouter:eval"
       mode: repository_executable
+      api_family: "anthropic_messages"
       runtime: "bun"
       runtime_version: "1.3.6"
       lockfile: "bun.lock"

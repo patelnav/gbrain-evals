@@ -1,5 +1,6 @@
 {
   "mode": "repository_executable",
+  "api_family": "anthropic_messages",
   "id": "contextual_synopsis_v1",
   "config_path": ".benchrouter/benchrouter.yml",
   "workflow": ".github/workflows/benchrouter-evals.yml",
