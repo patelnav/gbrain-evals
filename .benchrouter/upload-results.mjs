@@ -736,8 +736,14 @@ async function buildSnapshotRoute(route, configPath) {
     workflow_path: route.workflowPath,
     code_refs: route.codeRefs || [],
     code_ref_hashes: codeRefHashes,
-    api_family: replayContract.apiFamily,
     required_parameters: replayContract.requiredParameters,
+    api_families: replayContract.apiFamilies,
+    semantic_controls: replayContract.semanticControls,
+    features: replayContract.features,
+    input_kinds: replayContract.inputKinds,
+    output_kinds: replayContract.outputKinds,
+    protocol_headers: replayContract.protocolHeaders,
+    envelope_content_hash: replayContract.contentHash,
     eval_pack: route.evalPack,
     metadata: {
       eval_archetype: route.evalArchetype || "",
@@ -760,6 +766,9 @@ async function buildExecutableSnapshotRoute(route, configPath) {
   const acceptanceFp = hashString(canonicalJson({ primary_metric: executable.primaryMetric, acceptance_refs: acceptanceHashes }));
   const caseSetSha = hashString(canonicalJson(inputHashes));
   const scorerSha = hashString(canonicalJson(acceptanceHashes));
+  // Repository-executable evals declare their one protocol family. The rest is
+  // the smallest valid evaluated envelope because the evaluator's request bodies
+  // are not available to the kit at snapshot time.
   const envelope = { api_families: [executable.apiFamily], semantic_controls: [], features: [], input_kinds: ["input.text"], output_kinds: ["text"], protocol_headers: {} };
   const envelopeContentHash = hashString(canonicalJson(envelope));
   return { route_id: route.routeId, route_slug: route.slug, name: route.name, best_model: route.bestModel, eval_fingerprint: hashString(inputFp + ":" + acceptanceFp), input_fingerprint: inputFp, acceptance_fingerprint: acceptanceFp, config_sha256: await hashFile(configPath), scorer_sha256: scorerSha, case_set_sha256: caseSetSha, code_refs_sha256: hashString(canonicalJson(codeRefHashes)), covered_refs_sha256: hashString(canonicalJson([...inputHashes, ...acceptanceHashes, ...codeRefHashes])), case_count: 0, eval_command: route.evalCommand, result_schema: route.resultSchema, scorer_path: executable.acceptanceRefs[0], cases_path: executable.inputRefs[0], workflow_path: route.workflowPath, code_refs: route.codeRefs || [], code_ref_hashes: codeRefHashes, required_parameters: [], api_families: envelope.api_families, semantic_controls: envelope.semantic_controls, features: envelope.features, input_kinds: envelope.input_kinds, output_kinds: envelope.output_kinds, protocol_headers: envelope.protocol_headers, envelope_content_hash: envelopeContentHash, eval_pack: route.evalPack, metadata: { eval_archetype: route.evalArchetype || "", base_url_env: route.baseUrlEnv || "", provider_id: route.providerId || "", provider_ref: route.providerRef || "", observed_model: "" } };
@@ -791,38 +800,331 @@ async function caseCount(casesPath) {
 }
 
 async function routeReplayContract(casesPath) {
+  // ROUTE-001: the evaluated contract envelope is computed HERE, from the FULL
+  // local case set, because the corpus never leaves the repository (DATA-001).
+  // One UNKNOWN endpoint FAILS the upload rather than nulling the route
+  // contract, so a route can never serve claiming PPF quality for a family it
+  // was never graded on.
   const parsed = JSON.parse(await readFile(casesPath, "utf8"));
-  if (!Array.isArray(parsed)) return { apiFamily: null, requiredParameters: null };
+  if (!Array.isArray(parsed)) return emptyReplayContract();
   const families = new Set();
   const required = new Set();
+  const semanticControls = new Set();
+  const features = new Set();
+  const inputKinds = new Set(["input.text"]);
+  const anthropicVersions = new Set();
+  const anthropicBetas = new Set();
   for (const testCase of parsed) {
     if (!testCase || typeof testCase !== "object") continue;
     const endpoint = typeof testCase.endpoint === "string" && testCase.endpoint.length > 0
       ? testCase.endpoint.split("?")[0].replace(/\/+$/, "")
       : "/v1/chat/completions";
+    // SERVE-009: `/responses` publishes `openai_responses`. The retired
+    // `responses` value has no alias: a snapshot carrying it fails upload.
     const family = endpoint.endsWith("/chat/completions")
-      ? "chat_completions"
-      : endpoint.endsWith("/responses") ? "responses" : null;
-    if (!family) return { apiFamily: null, requiredParameters: null };
+      ? "openai_chat_completions"
+      : endpoint.endsWith("/messages") ? "anthropic_messages"
+      : endpoint.endsWith("/responses") ? "openai_responses" : null;
+    if (!family) {
+      throw new Error("Unknown eval case endpoint for the route contract envelope: " + endpoint);
+    }
     families.add(family);
+    const headers = testCase.headers && typeof testCase.headers === "object" ? testCase.headers : {};
+    for (const [name, value] of Object.entries(headers)) {
+      const lowered = String(name).toLowerCase();
+      if (lowered === "anthropic-version" && value) anthropicVersions.add(String(value).trim());
+      if (lowered === "anthropic-beta" && value) {
+        for (const beta of String(value).split(",")) {
+          const trimmed = beta.trim();
+          if (trimmed) anthropicBetas.add(trimmed);
+        }
+      }
+    }
     const body = testCase.input && typeof testCase.input === "object" && !Array.isArray(testCase.input)
       ? { ...testCase.input }
       : Array.isArray(testCase.messages) ? { messages: testCase.messages } : null;
     if (!body) continue;
     body.model = "route";
     if (body.temperature === undefined) body.temperature = 0;
-    const core = family === "chat_completions" ? new Set(["model", "messages", "stream"]) : new Set(["model", "input", "stream"]);
+    const core = new Set(["model", "messages", "stream", "route", "provider", "allow_fallbacks"]);
     for (const key of Object.keys(body)) {
       if (core.has(key)) continue;
-      if (key === "temperature" && body[key] === 0) continue;
-      required.add(key);
+      // The exact-zero temperature carve-out belongs to CAT-006 broad-search
+      // admission (`required_parameters`), NOT to the evaluated envelope. The
+      // runtime extractor treats an explicit zero as an explicit control, so
+      // dropping it here would make the envelope a SUBSET of the very request
+      // that was captured.
+      if (!(key === "temperature" && body[key] === 0)) required.add(key);
+      semanticControls.add(semanticControlName(family, key));
+    }
+    // The runtime extractor emits NESTED semantic classes that a top-level key
+    // scan cannot see (thinking type and budget, reasoning children, output
+    // effort, structured outputs, cache control). The envelope must be a
+    // SUPERSET of what the identical request produces at serve time, or that
+    // very request would later fail coverage with route_contract_mismatch.
+    collectNestedSemanticControls(family, body, semanticControls);
+    collectEnvelopeFeatures(family, body, features, inputKinds);
+  }
+  if (families.size === 0) return emptyReplayContract();
+  const envelope = {
+    api_families: Array.from(families).sort(),
+    semantic_controls: Array.from(semanticControls).sort(),
+    features: Array.from(features).sort(),
+    input_kinds: Array.from(inputKinds).sort(),
+    output_kinds: ["text"],
+    protocol_headers: {
+      anthropic_versions: Array.from(anthropicVersions).sort(),
+      anthropic_betas: Array.from(anthropicBetas).sort()
+    }
+  };
+  return {
+    apiFamilies: envelope.api_families,
+    requiredParameters: Array.from(required).sort(),
+    semanticControls: envelope.semantic_controls,
+    features: envelope.features,
+    inputKinds: envelope.input_kinds,
+    outputKinds: envelope.output_kinds,
+    protocolHeaders: envelope.protocol_headers,
+    contentHash: hashString(canonicalJson(envelope))
+  };
+}
+
+function emptyReplayContract() {
+  return {
+    apiFamilies: null,
+    requiredParameters: null,
+    semanticControls: null,
+    features: null,
+    inputKinds: null,
+    outputKinds: null,
+    protocolHeaders: null,
+    contentHash: null
+  };
+}
+
+// Names never prove equivalence: the same protocol name means a DIFFERENT
+// behaviour class in each family, so the envelope records the class.
+function semanticControlName(family, key) {
+  // SERVE-009: Responses control names ARE their own semantic class. The
+  // runtime extractor records each explicitly supplied top-level field under
+  // its own protocol name, so the envelope records the same name.
+  if (family === "openai_responses") return key;
+  if (family === "anthropic_messages") {
+    if (key === "max_tokens") return "anthropic_total_output_cap";
+    if (key === "output_config") return "anthropic_output_format";
+    return key;
+  }
+  if (key === "max_tokens") return "legacy_visible_output_cap";
+  if (key === "max_completion_tokens") return "total_completion_cap";
+  return key;
+}
+
+// Mirrors src/proxy/request-contract.ts. Every name added here must be one the
+// runtime extractor can emit for the same body; the envelope may be a superset
+// of a single request's contract, never a subset of it.
+function collectNestedSemanticControls(family, body, semanticControls) {
+  if (family === "openai_responses") {
+    // SERVE-009: a Responses envelope is derived from the DISCRIMINATED
+    // request, not from top-level key names alone. A tool choice implies the
+    // `tools` control at serve time even with no top-level `tools` key.
+    if (body.tool_choice !== undefined) semanticControls.add("tools");
+    if (body.parallel_tool_calls !== undefined) semanticControls.add("parallel_tool_calls");
+    return;
+  }
+  const reasoning = body.reasoning;
+  if (reasoning && typeof reasoning === "object" && !Array.isArray(reasoning)) {
+    for (const child of Object.keys(reasoning)) semanticControls.add("reasoning." + child);
+  }
+  if (body.stream_options !== undefined) semanticControls.add("stream_framing");
+  // A tool choice implies the `tools` control at serve time even when the body
+  // carried no top-level `tools` key.
+  if (body.tool_choice !== undefined) semanticControls.add("tools");
+  if (containsKeyDeep(body, "cache_control")) semanticControls.add("cache_control");
+  if (family === "anthropic_messages") {
+    const thinking = body.thinking;
+    if (thinking && typeof thinking === "object" && !Array.isArray(thinking)) {
+      if (typeof thinking.type === "string") semanticControls.add("thinking_type");
+      if (thinking.budget_tokens !== undefined) semanticControls.add("thinking_budget");
+    }
+    const outputConfig = body.output_config;
+    if (outputConfig && typeof outputConfig === "object" && !Array.isArray(outputConfig)) {
+      if (outputConfig.effort !== undefined) semanticControls.add("anthropic_output_effort");
+      if (outputConfig.format !== undefined) semanticControls.add("anthropic_output_format");
+    }
+    return;
+  }
+  const responseFormat = body.response_format;
+  if (responseFormat && typeof responseFormat === "object" && responseFormat.type === "json_schema") {
+    semanticControls.add("structured_outputs");
+  }
+}
+
+// The reasoning MODE, as the runtime bounded summary classifies it. Recorded as
+// a feature class because the same control name covers different behaviour
+// contracts: budgeted thinking is not the same evaluated surface as a bare
+// provider object.
+function reasoningKindFor(family, body) {
+  if (family === "openai_responses") {
+    const reasoning = body.reasoning;
+    const explicit = reasoning && typeof reasoning === "object" && !Array.isArray(reasoning)
+      && (reasoning.effort !== undefined || reasoning.summary !== undefined || reasoning.context !== undefined);
+    return explicit ? "responses" : "none";
+  }
+  if (family === "anthropic_messages") {
+    const thinking = body.thinking;
+    if (thinking !== undefined) {
+      const budgeted = thinking && typeof thinking === "object" && thinking.budget_tokens !== undefined;
+      return budgeted ? "budget" : "provider_object";
+    }
+    const outputConfig = body.output_config;
+    if (outputConfig && typeof outputConfig === "object" && outputConfig.effort !== undefined) return "effort";
+    return "none";
+  }
+  if (body.reasoning !== undefined) return "provider_object";
+  if (body.reasoning_effort !== undefined) return "effort";
+  return "none";
+}
+
+function collectEnvelopeFeatures(family, body, features, inputKinds) {
+  const reasoningKind = reasoningKindFor(family, body);
+  if (reasoningKind !== "none") features.add("reasoning_kind:" + reasoningKind);
+  if (family === "openai_responses") {
+    collectResponsesEnvelopeFeatures(body, features, inputKinds);
+    return;
+  }
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) {
+      if (!tool || typeof tool !== "object") continue;
+      const strict = tool.strict === true || (tool.function && tool.function.strict === true);
+      if (strict) features.add("strict_tool_schema");
     }
   }
-  if (families.size === 0) return { apiFamily: null, requiredParameters: null };
-  return {
-    apiFamily: families.size === 1 ? Array.from(families)[0] : "mixed",
-    requiredParameters: Array.from(required).sort()
-  };
+  const responseFormat = body.response_format;
+  if (responseFormat && typeof responseFormat === "object") {
+    if (responseFormat.type === "json_object") features.add("structured_output_json_object");
+    if (responseFormat.type === "json_schema") {
+      features.add("structured_output_json_schema");
+      if (responseFormat.json_schema && responseFormat.json_schema.strict === true) {
+        features.add("strict_output_schema");
+      }
+    }
+  }
+  const outputConfig = body.output_config;
+  if (outputConfig && typeof outputConfig === "object" && outputConfig.format !== undefined) {
+    features.add("structured_output_json_schema");
+    if (outputConfig.format && outputConfig.format.strict === true) features.add("strict_output_schema");
+  }
+  if (containsKeyDeep(body, "cache_control")) {
+    features.add("cache_accounting");
+    features.add("provider_reported_cost");
+  }
+  collectInputKinds(family, body, inputKinds);
+}
+
+// SERVE-009: derive the Responses envelope from the DISCRIMINATED request —
+// item kinds, tool strictness, tool choice, parallel behaviour, structured
+// output, reasoning controls, encrypted-reasoning use, and input content kinds.
+// Every name here is one the runtime extractor emits for the same body, so the
+// envelope is a superset of that request's contract and never a subset.
+function collectResponsesEnvelopeFeatures(body, features, inputKinds) {
+  const reasoning = body.reasoning;
+  if (reasoning && typeof reasoning === "object" && !Array.isArray(reasoning)) {
+    for (const control of ["effort", "summary", "context"]) {
+      if (reasoning[control] !== undefined) features.add("reasoning.responses." + control);
+    }
+  }
+  if (Array.isArray(body.include) && body.include.includes("reasoning.encrypted_content")) {
+    features.add("reasoning.encrypted_output");
+  }
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) {
+      if (!tool || typeof tool !== "object" || tool.type !== "function") continue;
+      // Strict and non-strict are DIFFERENT hard features.
+      if (tool.strict === true) features.add("tools.function.strict");
+      else features.add("tools.function");
+    }
+  }
+  if (body.parallel_tool_calls !== undefined) features.add("tools.parallel");
+  const text = body.text;
+  if (text && typeof text === "object" && !Array.isArray(text)) {
+    if (typeof text.verbosity === "string") features.add("text.verbosity");
+    const format = text.format;
+    if (format && typeof format === "object" && format.type === "json_schema") {
+      features.add("structured_output_json_schema");
+      if (format.strict === true) features.add("strict_output_schema");
+    }
+  }
+  // Statelessness and authoritative cost are required on every Responses
+  // attempt, so the envelope records them for every graded case.
+  features.add("responses.stateless_store_false");
+  features.add("responses.authoritative_cost");
+  const input = body.input;
+  if (!Array.isArray(input)) return;
+  for (const item of input) {
+    if (!item || typeof item !== "object") continue;
+    const type = typeof item.type === "string" ? item.type : "message";
+    if (type === "message" && item.role === "assistant") {
+      features.add("input.responses.assistant_history");
+      continue;
+    }
+    if (type === "function_call" || type === "function_call_output") {
+      features.add("input.responses.function_history");
+      continue;
+    }
+    if (type === "reasoning") {
+      if (typeof item.encrypted_content === "string" && item.encrypted_content.length > 0) {
+        features.add("reasoning.encrypted_input");
+      } else {
+        features.add("input.responses.reasoning_summary_history");
+      }
+      continue;
+    }
+    if (type !== "message") continue;
+    for (const part of Array.isArray(item.content) ? item.content : []) {
+      if (!part || typeof part !== "object") continue;
+      if (part.type === "input_image" && typeof part.image_url === "string") {
+        inputKinds.add(part.image_url.startsWith("data:") ? "input.image.inline" : "input.image.url");
+      }
+      if (part.type === "input_file") {
+        if (typeof part.file_data === "string") inputKinds.add("input.document.inline");
+        else if (typeof part.file_url === "string") inputKinds.add("input.document.url");
+      }
+    }
+  }
+}
+
+function collectInputKinds(family, body, inputKinds) {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  for (const message of messages) {
+    if (!message || typeof message !== "object" || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (!part || typeof part !== "object") continue;
+      if (family === "anthropic_messages") {
+        const source = part.source && typeof part.source === "object" ? part.source : null;
+        if (part.type === "image" && source) {
+          inputKinds.add(source.type === "base64" ? "input.image.inline" : "input.image.url");
+        }
+        if (part.type === "document" && source) {
+          inputKinds.add(source.type === "base64" ? "input.document.inline" : "input.document.url");
+        }
+        continue;
+      }
+      if (part.type === "image_url" || part.image_url !== undefined) {
+        const raw = part.image_url && typeof part.image_url === "object" ? part.image_url.url : part.image_url;
+        inputKinds.add(typeof raw === "string" && raw.startsWith("data:") ? "input.image.inline" : "input.image.url");
+      }
+      if (part.type === "file" || part.file !== undefined) {
+        const file = part.file && typeof part.file === "object" ? part.file : {};
+        inputKinds.add(file.file_data !== undefined ? "input.document.inline" : "input.document.url");
+      }
+    }
+  }
+}
+
+function containsKeyDeep(value, key) {
+  if (Array.isArray(value)) return value.some((child) => containsKeyDeep(child, key));
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value).some(([name, child]) => name === key || containsKeyDeep(child, key));
 }
 
 function safeResultSuffix(value) {
@@ -1078,8 +1380,9 @@ function executableChildEnv(route, runtimeEnv, includeSecrets = true) {
   const env = {};
   for (const [name, value] of Object.entries(runtimeEnv)) if (allowed.has(name) && typeof value === "string") env[name] = value;
   env.BENCHROUTER_ROUTE_ID = runtimeEnv.BENCHROUTER_ROUTE_ID;
-  // Repository-executable evaluators use the native SDK credential slot.
-  // BenchRouter derives route, model, and run context from this ephemeral token.
+  // Repository-executable code uses the native SDK credential slot. The
+  // ephemeral model-call token is the only API credential exposed to the
+  // child, so the server derives route/model/run context from its hash.
   env.BENCHROUTER_API_KEY = runtimeEnv.BENCHROUTER_EVAL_CALL_TOKEN_MODEL;
   env.BENCHROUTER_EVAL_BASE_URL = String(runtimeEnv.BENCHROUTER_API_URL || "");
   if (route.baseUrlEnv) env[route.baseUrlEnv] = env.BENCHROUTER_EVAL_BASE_URL;
@@ -1184,10 +1487,14 @@ async function uploadExecutableResults(apiUrl, runtimeEnv, route, uploadToken, r
   const primary = receipt.primary_metric;
   if (!primary || primary.name !== route.executable.primaryMetric || typeof primary.score !== "number" || !Number.isFinite(primary.score) || primary.score < 0 || primary.score > 1) throw new Error("Executable result receipt has an invalid primary metric");
   const observations = Array.isArray(receipt.observations) ? receipt.observations : [];
-  const results = observations.map((entry, index) => ({ case_id: String(entry.id || index + 1), case_version: String(entry.version || "1"), critical: entry.critical === true, model: runtimeEnv.BENCHROUTER_MODEL_ID, selected_model: runtimeEnv.BENCHROUTER_MODEL_ID, model_call_ids: [], pass: entry.pass === true, score: typeof entry.score === "number" ? entry.score : entry.pass === true ? 1 : 0 }));
+  const results = observations.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.pass !== "boolean") throw new Error("Executable result observation " + (index + 1) + " must include an explicit boolean pass value");
+    if (entry.score !== undefined && (typeof entry.score !== "number" || !Number.isFinite(entry.score) || entry.score < 0 || entry.score > 1)) throw new Error("Executable result observation " + (index + 1) + " has an invalid score");
+    return { case_id: String(entry.id || index + 1), case_version: String(entry.version || "1"), critical: entry.critical === true, model: runtimeEnv.BENCHROUTER_MODEL_ID, selected_model: runtimeEnv.BENCHROUTER_MODEL_ID, model_call_ids: [], pass: entry.pass, score: typeof entry.score === "number" ? entry.score : entry.pass ? 1 : 0 };
+  });
   const fingerprint = await buildFingerprint(results, runtimeEnv);
-  // The server derives the candidate model-call set from durable request rows.
-  // Do not require the evaluator to echo response-header IDs.
+  // The server derives the exact candidate model-call set from durable rows.
+  // Do not require the evaluator to echo response header IDs.
   const response = await fetch(apiUrl + "/v1/eval-model-runs/" + encodeURIComponent(modelRunId) + "/results", { method: "POST", headers: { authorization: "Bearer " + uploadToken, "content-type": "application/json" }, body: JSON.stringify({ result_set_id: resultSetId, action: "run", fingerprint, quality: { primary_metric: primary, metrics: receipt.metrics || {} }, results }) });
   if (!response.ok) throw new Error("BenchRouter executable result upload failed (" + response.status + " ): " + (await response.text()).slice(0, 500));
 }

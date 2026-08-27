@@ -38,11 +38,14 @@ Everything else is agent-owned. Do the smallest BenchRouter patch that works; do
 
 Routes: gbrain-evals/contextual-synopsis
 
-- Keep the exact manifest argv, runtime, runtime version, frozen lockfile, input_refs, acceptance_refs, result_path, primary_metric, call limit, spend limits, and timeout.
+- Keep the exact manifest api_family, argv, runtime, runtime version, frozen lockfile, input_refs, acceptance_refs, result_path, primary_metric, call limit, spend limits, and timeout.
 - Treat case_refs as declared executable evidence files. They can use the evaluator's native shape, including object-shaped qrels. Do not rewrite them as isolated-replay case arrays.
 - Do not create an isolated-replay cases file, scorer, or scorer calibration fixture for these routes.
 - Confirm every declared config, workflow, lockfile, input, acceptance, and case reference exists in the repository.
-- Confirm the evaluator writes benchrouter.executable_result.v1 at result_path with the declared primary metric and observations. BenchRouter derives model-call evidence from its durable request rows, so the evaluator must not echo response-header IDs.
+- Preserve the customer's evaluator framework, application startup, driver, artifacts, calibration, and definition of quality. BenchRouter does not replace or redesign them.
+- Confirm the evaluator writes benchrouter.executable_result.v1 at result_path with the declared scalar primary metric normalized to [0,1], where higher is better, optional secondary metrics each normalized to [0,1], and optional gate observations.
+- Do not include model_call_ids. BenchRouter derives the exact candidate call ledger server-side.
+- Keep scalar quality separate from optional observation gates. Every supplied gate observation must state an explicit boolean pass value. Do not derive observation pass values from the primary score or derive the primary score from observation pass values.
 - Quality is produced by the declared executable result after the evaluator runs. Local calibration does not run the evaluator and does not certify task quality.
 
 ## 3. Calibrate The Executable Declaration

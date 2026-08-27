@@ -142,13 +142,6 @@ interface BenchRouterExecutableResult {
   schema_version: 'benchrouter.executable_result.v1';
   primary_metric: { name: string; score: number };
   metrics: Record<string, number>;
-  observations: Array<{
-    id: string;
-    version: string;
-    critical: boolean;
-    pass: boolean;
-    score: number;
-  }>;
 }
 
 interface ParsedArgs {
@@ -655,17 +648,9 @@ function writeBenchRouterResult(
   resultPath: string,
   baseline: ModeResult,
   synopsis: ModeResult,
-  queries: QuerySpec[],
 ): void {
   const mrrLift = synopsis.mean_mrr - baseline.mean_mrr;
   mkdirSync(join(process.cwd(), '.benchrouter'), { recursive: true });
-  const observations = queries.map((q, idx) => ({
-    id: q.id,
-    version: '1',
-    critical: false,
-    pass: (synopsis.per_query_mrr[idx] ?? 0) > 0,
-    score: synopsis.per_query_mrr[idx] ?? 0,
-  }));
   const payload: BenchRouterExecutableResult = {
     schema_version: 'benchrouter.executable_result.v1',
     primary_metric: {
@@ -682,7 +667,6 @@ function writeBenchRouterResult(
       baseline_recall_at_5: baseline.mean_recall_at_5,
       baseline_recall_at_10: baseline.mean_recall_at_10,
     },
-    observations,
   };
   writeFileSync(resultPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
   process.stderr.write(`[cat26] benchrouter result: ${resultPath}\n`);
@@ -761,7 +745,7 @@ async function main(): Promise<void> {
     if (!baseline) throw new Error('benchrouter mode requires title baseline result');
     if (!synopsis) throw new Error('benchrouter mode requires per_chunk_synopsis result');
     const resultPath = args.resultPath ?? pack.result_path;
-    writeBenchRouterResult(resultPath, baseline, synopsis, queries);
+    writeBenchRouterResult(resultPath, baseline, synopsis);
     return;
   }
 

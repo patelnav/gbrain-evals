@@ -21,7 +21,7 @@
     },
     {
       "path": ".benchrouter/SETUP_README.md",
-      "sha256": "e2cae7acf9cd9557c5c8523c6d101c8f98aab38ea0bea1cb07cd16e12d22f964"
+      "sha256": "b42bc09b931198d78bbc203ecdbe1fe7a02df75bbb00346f1bed00668eda395b"
     },
     {
       "path": ".benchrouter/.gitignore",
@@ -41,7 +41,7 @@
     },
     {
       "path": ".benchrouter/upload-results.mjs",
-      "sha256": "821e37596603851c02a504c137dfe4993f3072b201774aac12de85dd64f37cb9"
+      "sha256": "cde6a1792ad057e5e7387e7d3005294ac622eeeb4fe60f13254af605b40910d3"
     },
     {
       "path": ".benchrouter/sidecar.mjs",
