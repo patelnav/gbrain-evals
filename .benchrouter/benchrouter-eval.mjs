@@ -131,6 +131,7 @@ function parseBenchRouterManifest(yamlText, configPath) {
     const mode = entry.eval_pack.mode === "repository_executable" ? "repository_executable" : "isolated_replay";
     const executable = mode === "repository_executable" ? {
       argv: requiredManifestStringList(entry.eval_pack.argv, prefix + ".eval_pack.argv"),
+      apiFamily: requiredManifestString(entry.eval_pack.api_family, prefix + ".eval_pack.api_family"),
       runtime: requiredManifestString(entry.eval_pack.runtime, prefix + ".eval_pack.runtime"),
       runtimeVersion: requiredExactRuntimeVersion(entry.eval_pack.runtime_version, prefix + ".eval_pack.runtime_version"),
       lockfile: requiredManifestRepoPath(entry.eval_pack.lockfile, prefix + ".eval_pack.lockfile"),
@@ -144,6 +145,7 @@ function parseBenchRouterManifest(yamlText, configPath) {
       timeoutMinutes: requiredManifestPositiveInteger(entry.eval_pack.timeout_minutes, prefix + ".eval_pack.timeout_minutes"),
       secretEnv: Array.isArray(entry.eval_pack.secret_env) ? requiredManifestUniqueList(entry.eval_pack.secret_env, prefix + ".eval_pack.secret_env") : []
     } : null;
+    if (executable && executable.apiFamily !== "openai_chat_completions" && executable.apiFamily !== "anthropic_messages" && executable.apiFamily !== "openai_responses") throw new Error(prefix + ".eval_pack.api_family must be openai_chat_completions, anthropic_messages, or openai_responses");
     if (executable && executable.runtime !== "node" && executable.runtime !== "bun") throw new Error(prefix + ".eval_pack.runtime must be node or bun");
     if (executable && executable.runtime === "bun" && executable.lockfile !== "bun.lock" && executable.lockfile !== "bun.lockb") throw new Error(prefix + ".eval_pack.lockfile must be bun.lock or bun.lockb for Bun");
     if (executable && executable.runtime === "node" && executable.lockfile !== "package-lock.json" && executable.lockfile !== "npm-shrinkwrap.json") throw new Error(prefix + ".eval_pack.lockfile must be package-lock.json or npm-shrinkwrap.json for Node");
@@ -203,6 +205,7 @@ const JUDGE_TIMEOUT_MS = Math.max(1000, Number(process.env.BENCHROUTER_JUDGE_TIM
 // to finish and persist an idempotent response before the runner retries it.
 const MODEL_TIMEOUT_MS = Math.max(1000, Number(process.env.BENCHROUTER_MODEL_TIMEOUT_MS) || 135000);
 const MODEL_TRANSPORT_RETRIES = 1;
+const RETRYABLE_MODEL_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504, 529]);
 // Sandbox deadlines so an extracted scorer can't hang the model run. Load timeout
 // bounds the synchronous module evaluation; the score() deadline bounds each
 // per-case call incl. its async judge round-trips. KNOWN LIMITATION (follow-up):
@@ -220,11 +223,23 @@ function withDeadline(value, ms, label) {
 }
 async function fetchWithTransportRetry(url, init, timeoutMs, retries, stage) {
     let lastError = null;
+    let httpRetryOrdinal = 0;
     for (let attempt = 0; attempt <= retries; attempt += 1) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
-            return await fetch(url, { ...init, signal: controller.signal });
+            const headers = new Headers(init.headers);
+            const idempotencyKey = headers.get("x-benchrouter-idempotency-key");
+            if (idempotencyKey && httpRetryOrdinal > 0) {
+                headers.set("x-benchrouter-idempotency-key", idempotencyKey + ":http-retry:" + httpRetryOrdinal);
+            }
+            const response = await fetch(url, { ...init, headers, signal: controller.signal });
+            if (stage === "model_call" && attempt < retries && RETRYABLE_MODEL_HTTP_STATUSES.has(response.status)) {
+                httpRetryOrdinal += 1;
+                await response.body?.cancel();
+                continue;
+            }
+            return response;
         }
         catch (error) {
             lastError = controller.signal.aborted
@@ -323,22 +338,14 @@ async function main() {
     const cases = selectCasesForRoute(allCases, baseRouteId).filter(isRunnableCase);
     assertRealEvalCoverage(cases, baseRouteId);
     function evalHeaders(callKind) {
-        const headers = {
-            "content-type": "application/json",
-            "x-benchrouter-force-model": callKind === "judge" ? (judgeModel || model) : model
-        };
         const evalCallToken = evalCallTokens[callKind] || "";
-        if (evalCallToken) {
-            headers["x-benchrouter-eval-call-token"] = evalCallToken;
+        if (modelRunId && uploadResults && !evalCallToken) {
+            throw new Error("BenchRouter official eval is missing server-issued " + callKind + " eval call token");
         }
-        if (modelRunId && uploadResults) {
-            if (!evalCallToken) {
-                throw new Error("BenchRouter official eval is missing server-issued " + callKind + " eval call token");
-            }
-            headers["x-benchrouter-result-set-id"] = resultSetId;
-            headers["x-benchrouter-model-run-id"] = modelRunId;
-        }
-        return headers;
+        return {
+            "content-type": "application/json",
+            authorization: "Bearer " + (evalCallToken || process.env.BENCHROUTER_API_KEY || "")
+        };
     }
     const rows = await runWithLimit(cases, CONCURRENCY, async (testCase) => {
         const started = Date.now();
@@ -441,8 +448,15 @@ async function main() {
             // Model-call wall time only — measured before the scorer/judge run.
             modelLatencyMs = Date.now() - callStarted;
             if (!response.ok) {
-                error = "upstream HTTP " + response.status;
-                failure = { stage: "model_call", error_code: FAILURE_CODES.upstreamHttpError, cause_code: null, cause_name: null, message: error };
+                // EVAL-011 / DATA-001: retain a bounded code, never the raw error body.
+                let causeCode = null;
+                try {
+                    const body = JSON.parse(text);
+                    const code = body?.error?.code;
+                    if (typeof code === "string" && /^[a-z][a-z0-9_]{0,79}$/.test(code)) causeCode = code;
+                } catch {}
+                error = "BenchRouter HTTP " + response.status + (causeCode ? " (" + causeCode + ")" : "");
+                failure = { stage: "model_call", error_code: FAILURE_CODES.upstreamHttpError, cause_code: causeCode, cause_name: null, message: error };
             }
             else {
                 const parsed = parseJsonObject(text);
@@ -483,8 +497,8 @@ async function main() {
                     }
                     }));
                     pass = result.pass === true;
-                    checks = Array.isArray(result.checks) ? result.checks.map(String) : [];
-                    reasons = Array.isArray(result.reasons) ? result.reasons.map(String) : [];
+                    checks = result.checks;
+                    reasons = result.reasons;
                     if (!pass && reasons.length === 0) {
                         reasons = ["scorer rejected the model output"];
                     }
@@ -576,7 +590,7 @@ async function loadScorer(scorerPath) {
     // Context-side membrane: a runner that parses host-supplied DATA in-context and
     // a judge factory that closes over the (unreachable) host callback. Defined by
     // code RUN IN the context, so all of it is context-realm.
-    vm.runInContext("globalThis.__benchrouter_scorer = (globalThis.module.exports && typeof globalThis.module.exports.score === 'function') ? globalThis.module.exports.score : (globalThis.benchrouterScorer && globalThis.benchrouterScorer.score);\nglobalThis.__benchrouter_makeJudge = function (hostJudge) {\n  return async function judge(messages) {\n    var payload;\n    try { payload = JSON.stringify(messages); } catch (stringifyErr) {\n      throw new Error('judge messages are not serializable');\n    }\n    if (typeof payload !== 'string') { payload = 'null'; }\n    var reply;\n    try {\n      reply = await hostJudge(payload);\n    } catch (hostErr) {\n      throw new Error('judge call failed: ' + (hostErr && hostErr.message ? String(hostErr.message) : String(hostErr)));\n    }\n    return typeof reply === 'string' ? reply : String(reply == null ? '' : reply);\n  };\n};\nglobalThis.__benchrouter_run = async function (payloadJson, judgeWrapper) {\n  var data = JSON.parse(payloadJson);\n  if (judgeWrapper) { if (!data.metadata) data.metadata = {}; data.metadata.judge = judgeWrapper; }\n  if (typeof globalThis.__benchrouter_scorer !== 'function') { throw new Error('scorer score() missing'); }\n  var result = await globalThis.__benchrouter_scorer(data);\n  var checks = result && Array.isArray(result.checks) ? result.checks.map(String) : [];\n  var reasons = result && Array.isArray(result.reasons) ? result.reasons.map(String) : [];\n  return JSON.stringify({ pass: !!(result && result.pass === true), checks: checks, reasons: reasons });\n};", sandbox, { timeout: SCORER_LOAD_TIMEOUT_MS });
+    vm.runInContext("globalThis.__benchrouter_scorer = (globalThis.module.exports && typeof globalThis.module.exports.score === 'function') ? globalThis.module.exports.score : (globalThis.benchrouterScorer && globalThis.benchrouterScorer.score);\nglobalThis.__benchrouter_makeJudge = function (hostJudge) {\n  return async function judge(messages) {\n    var payload;\n    try { payload = JSON.stringify(messages); } catch (stringifyErr) {\n      throw new Error('judge messages are not serializable');\n    }\n    if (typeof payload !== 'string') { payload = 'null'; }\n    var reply;\n    try {\n      reply = await hostJudge(payload);\n    } catch (hostErr) {\n      throw new Error('judge call failed: ' + (hostErr && hostErr.message ? String(hostErr.message) : String(hostErr)));\n    }\n    return typeof reply === 'string' ? reply : String(reply == null ? '' : reply);\n  };\n};\nglobalThis.__benchrouter_run = async function (payloadJson, judgeWrapper) {\n  var data = JSON.parse(payloadJson);\n  if (judgeWrapper) { if (!data.metadata) data.metadata = {}; data.metadata.judge = judgeWrapper; }\n  if (typeof globalThis.__benchrouter_scorer !== 'function') { throw new Error('scorer score() missing'); }\n  var result = await globalThis.__benchrouter_scorer(data);\n  var checks = result && Array.isArray(result.checks) ? result.checks : [];\n  for (var checkIndex = 0; checkIndex < checks.length; checkIndex++) {\n    var check = checks[checkIndex];\n    if (typeof check === 'string') { continue; }\n    if (!check || typeof check !== 'object' || Array.isArray(check)) { throw new Error('scorer result.checks[' + checkIndex + '] must be an object'); }\n    var checkKeys = Object.keys(check).sort();\n    if (checkKeys.length !== 4 || checkKeys[0] !== 'code_ref' || checkKeys[1] !== 'detail' || checkKeys[2] !== 'name' || checkKeys[3] !== 'pass') {\n      throw new Error('scorer result.checks[' + checkIndex + '] must contain exactly name, pass, detail, and code_ref');\n    }\n    if (typeof check.name !== 'string' || check.name.trim().length === 0) { throw new Error('scorer result.checks[' + checkIndex + '].name must be a non-empty string'); }\n    if (typeof check.pass !== 'boolean') { throw new Error('scorer result.checks[' + checkIndex + '].pass must be a boolean'); }\n    if (typeof check.detail !== 'string' || check.detail.trim().length === 0) { throw new Error('scorer result.checks[' + checkIndex + '].detail must be a non-empty string'); }\n    if (typeof check.code_ref !== 'string' || check.code_ref.trim().length === 0) { throw new Error('scorer result.checks[' + checkIndex + '].code_ref must be a non-empty string'); }\n  }\n  var reasons = result && Array.isArray(result.reasons) ? result.reasons.map(String) : [];\n  return JSON.stringify({ pass: !!(result && result.pass === true), checks: checks, reasons: reasons });\n};", sandbox, { timeout: SCORER_LOAD_TIMEOUT_MS });
     if (typeof sandbox.__benchrouter_scorer !== "function") {
         throw new Error("Scorer " + scorerPath + " must export score({request,output,reference,metadata}) -> {pass,checks,reasons}");
     }
@@ -607,8 +621,8 @@ async function loadScorer(scorerPath) {
         const parsed = JSON.parse(resultJson);
         return {
             pass: parsed.pass === true,
-            checks: Array.isArray(parsed.checks) ? parsed.checks.map(String) : [],
-            reasons: Array.isArray(parsed.reasons) ? parsed.reasons.map(String) : []
+            checks: parsed.checks,
+            reasons: parsed.reasons
         };
     });
 }
@@ -634,6 +648,12 @@ function buildReplayBody(testCase, routeId) {
         ? { ...testCase.input }
         : { messages: testCase.messages || [] };
     base.model = routeId;
+    // SERVE-009: replay is NON-STREAM, always. A stored case that carries
+    // `stream: true` would be dispatched as a stream and scored against a
+    // reconstruction, and the server rejects eval streams before dispatch
+    // anyway. The flag is dropped here so the case still replays as captured.
+    delete base.stream;
+    delete base.stream_options;
     if (base.temperature === undefined) {
         console.debug("BenchRouter: defaulted temperature=0 (route/case omitted it)", {
             route_id: routeId,
@@ -686,6 +706,50 @@ function replayEndpoint(testCase) {
         ? testCase.endpoint
         : "/v1/chat/completions";
 }
+// SERVE-009: item-aware extraction for a Responses body. The scorer is given
+// EXPLICIT inputs — ordered text, tool calls, refusal, and the structured
+// output candidate — chosen per supported item type. An unknown item is never
+// flattened into text: it is reported so the case fails loudly instead of
+// scoring against a silently reshaped answer.
+function extractResponsesOutput(parsed) {
+    const text = [];
+    const toolCalls = [];
+    const refusals = [];
+    const unsupported = [];
+    for (const item of parsed.output) {
+        if (!item || typeof item !== "object") {
+            unsupported.push("malformed_item");
+            continue;
+        }
+        if (item.type === "message") {
+            for (const part of Array.isArray(item.content) ? item.content : []) {
+                if (!part || typeof part !== "object") continue;
+                if (part.type === "output_text" && typeof part.text === "string") text.push(part.text);
+                else if (part.type === "refusal" && typeof part.refusal === "string") refusals.push(part.refusal);
+                else unsupported.push("content_part:" + String(part.type));
+            }
+            continue;
+        }
+        if (item.type === "function_call") {
+            toolCalls.push({ call_id: item.call_id, name: item.name, arguments: item.arguments });
+            continue;
+        }
+        // A reasoning item is native output but is NOT a scorer input: its
+        // summary, text, and encrypted content are opaque.
+        if (item.type === "reasoning") continue;
+        unsupported.push("item:" + String(item.type));
+    }
+    return {
+        object: "response",
+        status: typeof parsed.status === "string" ? parsed.status : null,
+        output: parsed.output,
+        text: text.join(""),
+        tool_calls: toolCalls,
+        refusal: refusals.length > 0 ? refusals[0] : null,
+        structured_output: refusals.length === 0 && text.length > 0 ? text.join("") : null,
+        unsupported_items: unsupported
+    };
+}
 // The FULL assistant message (content + tool_calls + ...) as a JSON string —
 // lossless, so re-judge and tool-calling routes lose nothing (Codex #5).
 function extractAssistantMessage(parsed) {
@@ -693,10 +757,8 @@ function extractAssistantMessage(parsed) {
     if (message && typeof message === "object") {
         return JSON.stringify(message);
     }
-    // /responses-style or unknown shapes: wrap the structured output as a message.
-    if (parsed.output !== undefined) {
-        const content = typeof parsed.output === "string" ? parsed.output : JSON.stringify(parsed.output);
-        return JSON.stringify({ role: "assistant", content });
+    if (Array.isArray(parsed.output)) {
+        return JSON.stringify(extractResponsesOutput(parsed));
     }
     return "";
 }

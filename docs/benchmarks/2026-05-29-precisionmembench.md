@@ -1,11 +1,46 @@
-# BrainBench: PrecisionMemBench (external benchmark)
+# PrecisionMemBench: how much irrelevant memory do we return?
 
-## 1. Headline
+First published May 29, 2026. The original gbrain runs were measured May 30. Corrected seeding was audited August 31; fresh runs were completed September 9.
 
-[PrecisionMemBench](https://github.com/tenurehq/precisionmembench) (tenurehq /
-Jeffrey Flynt) is the first memory benchmark that isolates *retrieval
-precision* from answer quality. We ran gbrain against it faithfully (Tenure's
-own MIT scorer, vendored verbatim) and measured the honest result.
+Finding the right fact is only half the problem. A search that returns that fact along with nineteen distractions has high recall and low precision. PrecisionMemBench asks us to pay attention to the distractions.
+
+The [September 9 rerun](2026-09-09-retrieval-refresh.md) confirms a useful gbrain setting: when the application expects one fact, a tight result limit substantially improves precision. It also confirms the cost: some relevant facts disappear. This is an application choice, not a universal search improvement.
+
+## What the benchmark asks
+
+[PrecisionMemBench](https://github.com/tenurehq/precisionmembench), by tenurehq / Jeffrey Flynt, provides 35 beliefs and 77 single-query cases. There are also 12 session cases; this report does not run them. A belief is a small piece of memory with text, aliases, and a scope, such as code preferences or writing preferences.
+
+Imagine two memories: “Use Postgres for new services” and an older, superseded preference that also mentions Postgres. A search must find the current preference without returning the old one merely because the words match. The real fixture includes a superseded SQLAlchemy belief with the alias “Postgres,” which makes this problem concrete.
+
+Precision is the fraction of returned belief IDs that belong in the answer. Recall is the fraction of expected IDs that were returned. If one belief is expected and we return it with nine others, precision is 0.10 and recall is 1.00. Some cases require an empty set. The scorer examines IDs, not the quality of a generated answer.
+
+Means exclude cases where the scorer returns null for that metric. In the fresh rows below, recall has 43 scored cases in each arm; precision has 49 / 70 / 70 / 65 / 66 scored cases respectively. These are not the same denominator as active passes. “Active passes” counts the 43 active cases; the full pass count also includes structural cases. Some structural results are assembled by the shared harness from the fixture, so their passes are not evidence that gbrain independently implemented those features.
+
+## The corrected result
+
+The May harness accidentally read the answer key. It used the fixture's `superseded_by` field to soft-delete four beliefs before searching. The upstream provider contract supplies only `{text, user_id, metadata, aliases}`. Other providers must work out supersession from the text itself.
+
+The August 31 paired keyword check measured the seeding correction directly: mean precision fell from 0.1389 to 0.1361 and total passes from 35/77 to 34/77. The newly failing `persona-prelude-content-present` case returned the live superseded SQLAlchemy belief through its “Postgres” alias. That local comparison isolates the seed change; the September release comparison below changes more than seeding.
+
+Current seeding keeps all 35 beliefs live. The September 9 runs use the current pinned gbrain release and explicit settings, complete all 77 cases, and report zero execution errors. Their full configuration and receipts are in the [refresh report](2026-09-09-retrieval-refresh.md).
+
+| September 9 configuration | Mean precision | Mean recall | Active passes | All cases passed |
+|---|---:|---:|---:|---:|
+| Keyword search | 0.1361 | 0.1744 | 5/43 | 34/77 |
+| Hybrid search, reranker off | 0.0565 | 0.9884 | 0/43 | 7/77 |
+| Hybrid search, reranker on | 0.0565 | 0.9884 | 0/43 | 7/77 |
+| Tight adaptive limit, reranker off | 0.5333 | 0.7320 | 25/43 | 38/77 |
+| Tight adaptive limit, reranker on | 0.5859 | 0.8250 | 29/43 | 41/77 |
+
+“Tight” means at most one result for both entity questions and other questions (`entityMax=1`, `otherMax=1`). The adaptive feature is opt-in. Its ordinary caps are two and six; enabling the feature is separate from choosing its caps.
+
+Broad hybrid search finds almost every expected belief but returns many extras. Reranking the same broad set does not change set precision. Once the result set is capped, order matters: the reranker improves both precision and recall in the fresh tight-limit run. This is why a good ordering score and a good returned set are different things.
+
+For “What is my database preference?”, one result can be useful. For “Who has worked on infrastructure?”, one result may hide most of the answer. The benchmark supports exposing the choice. It does not support turning on a one-result limit for every user.
+
+## What the May report recorded
+
+The following table is retained as the historical record. Every May gbrain row used the flawed seeding. These are not current, comparable leaderboard entries. In particular, the old 0.582 score and 44/77 passes must not be substituted for the corrected 0.5859 and 41/77 result above: the release and configuration also changed.
 
 | System | Precision | Active passes | Pass | p50 |
 |---|---|---|---|---|
@@ -14,7 +49,7 @@ own MIT scorer, vendored verbatim) and measured the honest result.
 | supermemory | 0.43 | 17 | 44/77 | 819ms |
 | gbrain — adaptive (recall-preserving) | 0.40 | 12 | 21/77 | ~270ms |
 | gbrain — think (cited set) | 0.38 | 15 | 26/77 | 4945ms |
-| **gbrain — default hybrid** | **0.076** | **0** | **7/77** | ~270ms |
+| **gbrain — default hybrid** | **0.075** | **0** | **7/77** | ~270ms |
 | yourmemory | 0.17 | 0 | 21/77 | 313ms |
 | agentmemory | 0.17 | 0 | 7/77 | 82ms |
 | atomicmemory | 0.15 | 0 | 9/77 | 71ms |
@@ -22,65 +57,15 @@ own MIT scorer, vendored verbatim) and measured the honest result.
 | vector baseline | 0.088 | 0 | 9/77 | — |
 | mem0 | 0.056 | 0 | 9/77 | 65ms |
 
-Two honest facts. First, **gbrain's default retrieval scores 0.076** — right in
-the mem0/zep/vector cluster. Top-K hybrid returns ~20 results, recall is 0.99,
-and precision collapses. That is the benchmark working as designed: it punishes
-returning a pile and letting a downstream model sort it out. Second, with an
-**opt-in retrieval feature we built off the back of this benchmark** — intent-
-aware return-sizing — gbrain reaches **0.582 precision and 29 active passes,
-clear of supermemory on both axes.** That is a solid #2, at a third of
-supermemory's latency.
+The standalone hybrid artifact records 0.0752; the instrument sweep records 0.0756. Those are separate runs, rounded differently. We have not established the cause of the difference. Earlier versions of this report called it embedding jitter without isolating that cause.
 
-We did not chase tenure's 1.00, on purpose. This benchmark scores one narrow
-property (exact-ID precision on a 35-belief lexical store), and a system tuned to
-top it would be worse at what agentic memory actually needs: recall, multi-
-session reasoning, temporal and contradiction handling, synthesis at scale. You
-want a memory that is strong across that whole grid, not excellent in one cell.
-§9 makes that case in full.
+External rows also belong to the original snapshot. The [upstream README](https://github.com/tenurehq/precisionmembench), checked September 9, lists supermemory at 0.22 precision and roughly 69 ms, rather than this table's 0.43 and 819 ms. We did not reproduce either external run. The old claim that gbrain was “#2 at a third of supermemory's latency” is therefore not a supported comparison.
 
-## 2. What is gbrain
+## Why we tried an adaptive limit
 
-gbrain is a personal knowledge brain: an embedded Postgres (PGLite) store with
-hybrid retrieval (vector + keyword + RRF), a typed knowledge graph, fact
-extraction, and a `think` pipeline that gathers broadly and answers with
-citations. It is a general-purpose brain, not a narrow belief store.
+Gbrain combines keyword matches and embedding matches. Embeddings help with paraphrases; keywords help with names and exact terms. Returning a broad set is often useful when another stage must compare several documents. PrecisionMemBench makes the cost of that breadth visible.
 
-## 3. What is PrecisionMemBench
-
-A 35-belief seed corpus, 77 single-query cases (+ 12 session cases, not run
-here). Each belief has a `canonical_name`, `aliases`, `content`, a `scope`
-(`domain:code` / `domain:writing` / `user:universal`), and supersession
-pointers. The harness builds a context per query and scores the **belief IDs**
-the provider's `/search` returns:
-
-- `precision = (expected returned) / (total returned)`
-- The `shouldOnlyInclude` assertion demands an *exact* set; some cases expect
-  *empty*.
-
-It is explicitly embedding-invariant: cosine similarity scores ~0.09 precision
-whether you use a 768-d encoder or an 8B-param model. What it rewards is **hard
-scope isolation + alias resolution + supersession exclusion + calibrated
-return-set sizing.** Only the returned IDs matter; result text is ignored.
-
-## 4. Modes tested
-
-All gbrain modes feed beliefs the way real content arrives (one page per belief,
-`scope` → a real gbrain source, superseded beliefs → real soft-delete) and
-override only the harness's `searchText`. No benchmark-specific logic.
-
-- **`gbrain-hybrid`** — gbrain's real default retrieval (vector + keyword + RRF),
-  top-K. The honest baseline.
-- **`gbrain-adaptive`** — `gbrain-hybrid` + the new **intent-aware adaptive
-  return-sizing** feature (`adaptiveReturn`). Tight caps (return ~1) maximize
-  precision; recall-preserving caps keep more answers. Default-OFF in gbrain.
-- **`gbrain-think`** — return the beliefs gbrain's `think` pipeline actually
-  *cited* (gather broad, cite narrow). A distinct lens, not the `/search`
-  contract (see §9).
-- **`gbrain-keyword`** — pure FTS, no embeddings (no-API-key fallback).
-
-## 5. Results — what the feature does
-
-The adaptive gate is a smooth precision/recall dial on the same retrieval:
+The May sweep tried progressively smaller result caps. It is historical evidence from the flawed seed, useful for understanding the experiment but not for quoting current scores.
 
 | Setting | Precision | Recall | Active | Pass |
 |---|---|---|---|---|
@@ -89,82 +74,29 @@ The adaptive gate is a smooth precision/recall dial on the same retrieval:
 | caps entity=1 / other=2 (recall-preserving) | 0.40 | 0.91 | 12 | 21/77 |
 | caps entity=1 / other=1 (max precision) | 0.58 | 0.82 | 29 | 44/77 |
 
-The benchmark rewards the aggressive end; a real user wants somewhere in the
-middle (returning *only* one result is wrong for "who works on infra"). That is
-why the feature ships **default-off and opt-in** with tunable caps, rather than
-flipping gbrain's default to aggressive.
+We also considered stopping where retrieval scores fall sharply. The old instrumentation found the right belief first in 94% of single-answer cases, but the mean first-to-second score gap was 0.602 when the first result was right and 0.569 when it was wrong. Those two summaries did not establish a reliable confidence threshold. A large gap in a rank-fusion score can come from the ranking formula itself.
 
-## 6. Per-category (gbrain-adaptive tight)
+The instrument originally keyed captured scores by query text, then changed to case IDs after audit finding `precisionmembench-05`. The duplicated query strings shared scope and budget in this fixture, so that keying issue did not change these recorded summaries. It remains separate from the seeding flaw.
 
-Alias resolution (23 cases) and scope disambiguation (12) are where the win
-concentrates — alias queries resolve via gbrain's real FTS over the alias text,
-scope via real multi-source isolation, supersession via real soft-delete.
+## Search and answering are different experiments
 
-## 7. Why we did not build a "score cliff" detector
+The May `gbrain-think` run measured the beliefs cited by an answering model. It recorded about 0.38 precision, 15 active passes, 26/77 total passes, and 4,945 ms median latency. It used the flawed seed and has not been refreshed here.
 
-We instrumented before building. The plan's first idea was an adaptive *cliff
-detector* — cut the result set where the scores drop off. The data killed it:
-across single-answer cases the right belief is rank-1 **94%** of the time, but
-the rank1→rank2 score gap is **0.602 when rank-1 is correct vs 0.569 when it is
-wrong**. The gap is RRF's mechanical decay; it carries no signal about whether
-the top result is trustworthy. So "return a tight set" is the entire win, and a
-cliff detector just adds noise. Instrumenting first kept a useless mechanism out
-of gbrain core.
+A citation set mixes retrieval, reasoning, and whether the model chooses to cite something. It is not the same contract as returning search results. The historical `think` path also lacked the source filter used by the search adapter, so scope mistakes could enter during gathering. These observations describe that run, not a claim about every later version of `think`.
 
-## 8. Latency + cost
+The May adaptive limit added no model call of its own; its reported search latency was about 270 ms. The underlying search could still pay for embeddings or reranking. Comparisons with other providers' latency require matching hardware, warm caches, network conditions, and protocol.
 
-gbrain-adaptive runs at ~270ms p50 (a third of supermemory's 819ms) with zero
-extra LLM cost — the gate is a sort + slice. `gbrain-think` trades 18× the
-latency (4.9s, one LLM call per query) for *less* precision than the cheap gate.
-tenure's 9.8ms reflects a purpose-built BM25 belief store.
+## How the harness works
 
-## 9. Limits & caveats (read this before quoting numbers)
+The scorer and fixture are vendored from upstream commit `c9689ca` under MIT. The report builder, belief definitions, and base adapter are copied; the assertion loop follows the upstream tests. Parity tests check verdicts, IDs, and metrics while ignoring timing differences.
 
-**The bigger caveat is what this benchmark is for.** PrecisionMemBench measures
-one property: return the exact right belief ID from a 35-item store and nothing
-else. That is a real property, and it found a real gap in gbrain's default (we
-built a feature from it). But being good *only* at that is the wrong goal for
-agentic memory. A working agent's memory has to not miss the fact (recall),
-reason across many sessions, handle contradictions and time, and hand a
-reasoning loop the relevant cluster rather than one pre-filtered row. A system
-tuned to win this test (return a single belief by lexical match) is actively
-worse at most of that: aggressive precision is a recall tax, and an agent that
-only ever sees one retrieved belief cannot weigh alternatives. That is exactly
-why gbrain's default optimizes for recall and reasoning (and "loses" here at
-0.076), and why the precision gate is opt-in. You do not want a memory that is
-excellent in one narrow way. You want one that is strong across the board:
-recall, precision, temporal reasoning, contradiction handling, synthesis, and
-scale. This benchmark scores a single cell of that grid.
+Each belief becomes a page. Scope maps to a real gbrain source; universal user beliefs are included with the relevant domain. Alias text goes into the searchable body. All beliefs, including superseded ones, are now indexed live. Gbrain must exclude an old belief using information available in the supplied text or fail the case.
 
-- **Structural categories are harness-computed, not gbrain.** The harness builds
-  pinned facts, open questions, and relation expansion from the fixture itself —
-  identical for every provider. gbrain's real contribution is only the
-  `searchText` categories (alias, scope, fuzzy, supersession, ranking). We do
-  not claim credit for the structural passes.
-- **`gbrain-think` is a citation lens, not the `/search` contract.** It measures
-  what the model cited, mixing retrieval with prompt-following and model
-  nondeterminism. Reported separately, never as an apples-to-apples provider
-  number.
-- **`think` cannot scope-isolate today.** gbrain's `runThink` has no source
-  filter, so its gather runs unscoped; scope-disambiguation cases can be cited
-  wrong. Plumbing filed as follow-up.
-- **The adaptive feature is default-off.** Flipping any gbrain mode default is
-  gated on a cross-surface ablation (does the gate hurt recall on LongMemEval /
-  whoknows / contradictions?) that is deliberately *not* done here. The
-  precision/recall frontier in §5 is the on-surface evidence; the cross-surface
-  answer-quality gate is future work.
-- **tenure's 1.00 is the clean illustration of the narrow-win trap.** A
-  purpose-built BM25 belief store, tuned to its own 35-belief lexical corpus,
-  scored on a single `/search` call that cannot even see a retrieve-then-reason
-  architecture. Impressive on this test; unmeasured on everything a personal
-  brain is actually for. gbrain's general-purpose results live in the LongMemEval
-  (97.60% R@5, SOTA) and BrainBench reports in this repo. Precision isolation is
-  a genuine gap worth probing, which is why we built a feature from it, but a
-  1.00 on a 35-belief lexical set is not a general-purpose memory. We would
-  rather be #2 here and strong everywhere than top this one probe by sacrificing
-  recall and reasoning on real workloads.
+The adapter exposes keyword, hybrid, adaptive, and `think` modes. The adaptive policy runs after reranking, applies to the first page, and has an at-least-one fallback. It is therefore not, by itself, a complete solution for questions that should return nothing. Exact empty-set behavior, supersession, and scope isolation deserve their own checks.
 
-## 10. Reproduction
+## Reproducing the historical run
+
+These are the original commands. They describe the May setup, including its then-unmerged feature and provider assumptions. For a current comparison, use the [refresh report](2026-09-09-retrieval-refresh.md) and its explicit configuration.
 
 ```bash
 cd ~/git/gbrain-evals
@@ -173,37 +105,14 @@ cd ~/git/gbrain-evals
 bun link gbrain
 export OPENAI_API_KEY=...   # embeddings; ANTHROPIC_API_KEY for think mode
 
-bun eval/runner/precisionmembench.ts --mode gbrain-hybrid                       # baseline 0.076
-bun eval/runner/precisionmembench.ts --mode gbrain-adaptive --entity-max 1 --other-max 1   # 0.58
+bun eval/runner/precisionmembench.ts --mode gbrain-hybrid                       # baseline (published 0.075 pre-correction; measure the effect)
+bun eval/runner/precisionmembench.ts --mode gbrain-adaptive --entity-max 1 --other-max 1   # tight caps (published 0.58 pre-correction)
 bun eval/runner/precisionmembench.ts --mode gbrain-adaptive --entity-max 1 --other-max 2   # recall-preserving
 bun eval/runner/precisionmembench.ts --mode gbrain-think                        # citation lens
+bun eval/runner/precisionmembench.ts --mode gbrain-keyword                      # hermetic, no API key needed
 bun eval/runner/precisionmembench-instrument.ts                                 # policy sweep + cliff read
 ```
 
-Reports land in `eval/reports/precisionmembench/`.
+Current output names include resolved caps and limits so two configurations do not overwrite each other. Unknown mode or fidelity values fail immediately. A `--limit N` run is partial and cannot stand in for the full benchmark. Corrected seeding can lower a score, but a lower score is not guaranteed when the software and settings also change; the September results demonstrate why we measure instead of predicting.
 
-## 11. Methodology
-
-- **Faithful scorer.** Tenure's `buildRetrievalReport.ts` + `belief.ts` +
-  `baseAdapter.ts` are vendored byte-for-byte (MIT, pinned `c9689ca`); the
-  per-case assertion loop is lifted verbatim out of their ava test into
-  `runCases.ts`. Invariant: semantic parity (identical verdicts / IDs / metrics,
-  timings normalized out), pinned by `test/eval/precisionmembench-scorer.test.ts`.
-- **Honest seeding.** scope → gbrain `source_id` (real multi-source isolation,
-  `user:universal` federated into each domain query); superseded beliefs →
-  `engine.softDeletePage` (real soft-delete); aliases in page body (real FTS).
-- **The feature.** `adaptiveReturn` in `gbrain/src/core/search/return-policy.ts`
-  + `hybrid.ts`: intent-aware return-sizing, after rerank, before slice,
-  first-page only, at-least-1 failsafe, default-off, 19 unit tests.
-
-## 12. Files
-
-- `eval/precisionmembench/` — vendored fixtures + scorer, gbrain adapters, seed,
-  scope mapping, gate prototype, attribution.
-- `eval/runner/precisionmembench.ts` — the 4-mode runner.
-- `eval/runner/precisionmembench-instrument.ts` — the policy sweep + cliff read.
-- `docs/benchmarks/2026-05-29-precisionmembench/` — committed per-run JSON
-  reports (the durable copies; `eval/reports/` itself is gitignored transient
-  output).
-- gbrain core: `src/core/search/return-policy.ts`, `hybrid.ts`,
-  `test/search/return-policy.test.ts`.
+The durable May artifacts are in [2026-05-29-precisionmembench/](2026-05-29-precisionmembench/). Fresh artifacts are under [2026-09-09-retrieval-refresh/](2026-09-09-retrieval-refresh/). The runner is `eval/runner/precisionmembench.ts`; seeding and the vendored scorer live in `eval/precisionmembench/`. This small benchmark found a real product issue: good recall does not excuse an unnecessarily noisy result set. Gbrain now has a measured way to make that tradeoff explicit.

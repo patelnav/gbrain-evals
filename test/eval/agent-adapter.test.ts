@@ -4,20 +4,29 @@
  * Uses a stubbed Anthropic client (no real LLM calls) + an in-process
  * PGLite engine (fast, no network). Covers:
  *   - Adapter.query() throws (by design)
- *   - Adapter.init() seeds PGLite with rawPages
+ *   - Adapter.init() seeds PGLite with rawPages + pins search config (WS5)
  *   - runAgentLoop: tool_use → tool_result → end_turn happy path
  *   - runAgentLoop: turn cap reached without end_turn
  *   - runAgentLoop: ForbiddenOpError (agent tried a mutating op) → tool_result is_error
- *   - brain_first_ordering classification
+ *   - runAgentLoop: gbrain OperationError → is_error tool_result the agent
+ *     self-corrects from (regression for audit agentic-cats-01: previously
+ *     rethrown, killing the whole Cat 8/9 run)
+ *   - rate-limit exhaustion → stop_reason 'rate_limit_exhausted', no throw
+ *     (regression for audit adapters-queries-01 / agentic-cats-07)
+ *   - brain_first_ordering classification incl. 'no_answer' + real
+ *     answer-before-brain detection (regression for adapters-queries-02 /
+ *     agentic-cats-06)
  *   - extractSlugs regex
  */
 
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import Anthropic from '@anthropic-ai/sdk';
 import {
   ClaudeSonnetWithToolsAdapter,
   runAgentLoop,
   extractSlugs,
+  classifyAgentError,
+  setTeardownDisconnectBoundMs,
   type AgentAdapterState,
 } from '../../eval/runner/adapters/claude-sonnet-with-tools.ts';
 import type { Page } from '../../eval/runner/types.ts';
@@ -97,6 +106,18 @@ describe('ClaudeSonnetWithToolsAdapter — Adapter interface', () => {
     expect(state.engine).toBeDefined();
     const page = await state.engine.getPage('people/amara');
     expect(page?.title).toBe('Amara Okafor');
+    await adapter.teardown(state); // restored at the v0.47.8.0 pin: the v0.46.3 disconnect() sync-spin under `bun test` no longer reproduces
+  });
+
+  test('init() pins search mode + reranker BEFORE ingest and records them (WS5)', async () => {
+    const adapter = new ClaudeSonnetWithToolsAdapter();
+    const state = (await adapter.init(SAMPLE_PAGES, { name: 'test' })) as AgentAdapterState;
+    // Never rely on gbrain defaults: 'balanced' silently enables the
+    // zerank-2 reranker when ZEROENTROPY_API_KEY is set.
+    expect(state.resolved_search_config).toEqual({
+      'search.mode': 'balanced',
+      'search.reranker.enabled': 'false',
+    });
     await adapter.teardown?.(state);
   });
 
@@ -114,7 +135,7 @@ describe('ClaudeSonnetWithToolsAdapter — Adapter interface', () => {
     }
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toContain('intentionally unsupported');
-    await adapter.teardown?.(state);
+    await adapter.teardown(state); // restored at the v0.47.8.0 pin: the v0.46.3 disconnect() sync-spin under `bun test` no longer reproduces
   });
 });
 
@@ -163,7 +184,7 @@ describe('runAgentLoop — happy path', () => {
     expect(result.total_output_tokens).toBe(70);
     expect(result.total_cost_usd).toBeGreaterThan(0);
 
-    await adapter.teardown?.(state);
+    await adapter.teardown(state); // restored at the v0.47.8.0 pin: the v0.46.3 disconnect() sync-spin under `bun test` no longer reproduces
   });
 
   test('immediate end_turn (no tool calls) → no_brain_calls ordering', async () => {
@@ -182,7 +203,7 @@ describe('runAgentLoop — happy path', () => {
     expect(result.stop_reason).toBe('end_turn');
     expect(result.brain_first_ordering).toBe('no_brain_calls');
     expect(result.evidence_refs).toEqual([]);
-    await adapter.teardown?.(state);
+    await adapter.teardown(state); // restored at the v0.47.8.0 pin: the v0.46.3 disconnect() sync-spin under `bun test` no longer reproduces
   });
 });
 
@@ -211,7 +232,7 @@ describe('runAgentLoop — turn cap + error paths', () => {
     expect(lastTurn.kind).toBe('final_answer');
     expect(lastTurn.final_answer?.text).toBe('');
 
-    await adapter.teardown?.(state);
+    await adapter.teardown(state); // restored at the v0.47.8.0 pin: the v0.46.3 disconnect() sync-spin under `bun test` no longer reproduces
   });
 
   test('agent attempts a mutating op → tool_result records is_error', async () => {
@@ -235,6 +256,194 @@ describe('runAgentLoop — turn cap + error paths', () => {
     expect(content).toContain('forbidden_op');
     // Loop continues; final answer eventually happens
     expect(result.stop_reason).toBe('end_turn');
+
+    await adapter.teardown(state); // restored at the v0.47.8.0 pin: the v0.46.3 disconnect() sync-spin under `bun test` no longer reproduces
+  });
+});
+
+// ─── OperationError → is_error tool_result (agentic-cats-01) ─────────
+
+describe('runAgentLoop — gbrain OperationError becomes a self-correctable tool_result', () => {
+  test('get_page on a missing slug does NOT throw; agent sees the error envelope and recovers', async () => {
+    const adapter = new ClaudeSonnetWithToolsAdapter();
+    const state = (await adapter.init(SAMPLE_PAGES, { name: 'test' })) as AgentAdapterState;
+
+    const client = stubClient([
+      // Turn 1: agent asks for a page that does not exist → gbrain throws
+      // OperationError('page_not_found', ...) inside the handler.
+      toolResp('get_page', { slug: 'people/does-not-exist' }, 'tool-miss'),
+      // Turn 2: agent self-corrects with the right slug.
+      toolResp('get_page', { slug: 'people/amara' }, 'tool-hit'),
+      // Turn 3: final answer.
+      textResp('Amara Okafor is a Partner. Source: `people/amara`.'),
+    ]);
+
+    const result = await runAgentLoop('q-op-err', 'Who is Amara?', state, {
+      client,
+      maxRetries: 1,
+    });
+
+    // The run completed instead of crashing the whole category.
+    expect(result.stop_reason).toBe('end_turn');
+    // The failed call produced a structured error envelope in the trace.
+    const toolResults = result.transcript.turns.filter(t => t.kind === 'tool_result');
+    expect(toolResults.length).toBe(2);
+    expect(toolResults[0].tool_result!.content).toContain('page_not_found');
+    // Ordering still counts the recovered brain read.
+    expect(result.brain_first_ordering).toBe('brain_before_answer');
+
+    await adapter.teardown?.(state);
+  });
+});
+
+// ─── Rate-limit exhaustion (adapters-queries-01 / agentic-cats-07) ────
+
+function rateLimitError(): Error & { status: number } {
+  const err = new Error('rate limited') as Error & { status: number };
+  err.status = 429;
+  return err;
+}
+
+describe('runAgentLoop — rate-limit exhaustion ends gracefully', () => {
+  test('sustained 429s produce stop_reason rate_limit_exhausted instead of throwing', async () => {
+    const adapter = new ClaudeSonnetWithToolsAdapter();
+    const state = (await adapter.init(SAMPLE_PAGES, { name: 'test' })) as AgentAdapterState;
+
+    const client = {
+      messages: {
+        create: async () => {
+          throw rateLimitError();
+        },
+      },
+    } as unknown as Anthropic;
+
+    // maxRetries=1 → the single (final) attempt fails rate-limited with no
+    // backoff sleep, so this test is fast AND exercises the exhaustion path.
+    const result = await runAgentLoop('q-429', 'Who is Amara?', state, {
+      client,
+      maxRetries: 1,
+    });
+
+    expect(result.stop_reason).toBe('rate_limit_exhausted');
+    expect(result.final_answer).toBe('');
+    expect(result.brain_first_ordering).toBe('no_brain_calls');
+
+    await adapter.teardown?.(state);
+  });
+
+  test('non-rate-limit API errors still throw (typed dependency/harness by callers)', async () => {
+    const adapter = new ClaudeSonnetWithToolsAdapter();
+    const state = (await adapter.init(SAMPLE_PAGES, { name: 'test' })) as AgentAdapterState;
+
+    const client = {
+      messages: {
+        create: async () => {
+          throw new Error('boom: not a rate limit');
+        },
+      },
+    } as unknown as Anthropic;
+
+    let err: unknown = null;
+    try {
+      await runAgentLoop('q-boom', 'Who is Amara?', state, { client, maxRetries: 1 });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('boom');
+
+    await adapter.teardown?.(state);
+  });
+
+  test('classifyAgentError types API-shaped errors dependency, everything else harness', () => {
+    expect(classifyAgentError(rateLimitError())).toBe('dependency');
+    expect(classifyAgentError(Object.assign(new Error('overloaded'), { status: 529 }))).toBe('dependency');
+    expect(classifyAgentError(new Error('tool-bridge internal: contract break'))).toBe('harness');
+    expect(classifyAgentError(new Error('anything else'))).toBe('harness');
+  });
+});
+
+// ─── brain_first_ordering labels (adapters-queries-02 / agentic-cats-06) ──
+
+describe('runAgentLoop — brain_first_ordering', () => {
+  test("turn-cap run with brain calls but no answer is 'no_answer', NOT 'answer_before_brain'", async () => {
+    const adapter = new ClaudeSonnetWithToolsAdapter();
+    const state = (await adapter.init(SAMPLE_PAGES, { name: 'test' })) as AgentAdapterState;
+
+    const manyTools: StubResponse[] = [];
+    for (let i = 0; i < 3; i++) {
+      manyTools.push(toolResp('get_page', { slug: 'people/amara' }, `tool-${i}`));
+    }
+    const client = stubClient(manyTools);
+
+    const result = await runAgentLoop('q-no-answer', 'loop forever', state, {
+      client,
+      turnCap: 3,
+      maxRetries: 1,
+    });
+
+    expect(result.stop_reason).toBe('turn_cap_exceeded');
+    expect(result.brain_first_ordering).toBe('no_answer');
+
+    await adapter.teardown?.(state);
+  });
+
+  test('substantive answer text emitted BEFORE the first brain read is answer_before_brain', async () => {
+    const adapter = new ClaudeSonnetWithToolsAdapter();
+    const state = (await adapter.init(SAMPLE_PAGES, { name: 'test' })) as AgentAdapterState;
+
+    const preWrittenAnswer =
+      'Amara Okafor is a Partner at Halfway Capital focused on climate and AI infrastructure ' +
+      'investments at the seed and Series A stages. Let me verify that in the brain.';
+    const client = stubClient([
+      // Turn 1: full answer as text ALONGSIDE a throwaway brain call.
+      {
+        content: [
+          { type: 'text', text: preWrittenAnswer },
+          { type: 'tool_use', id: 'tool-1', name: 'get_page', input: { slug: 'people/amara' } },
+        ],
+        usage: { input_tokens: 100, output_tokens: 80 },
+        stop_reason: 'tool_use',
+      },
+      // Turn 2: final answer.
+      textResp('Confirmed: Amara is a Partner. Source: `people/amara`.'),
+    ]);
+
+    const result = await runAgentLoop('q-cheat', 'Who is Amara?', state, {
+      client,
+      maxRetries: 1,
+    });
+
+    expect(result.stop_reason).toBe('end_turn');
+    // Previously classified 'brain_before_answer' — the pre-written answer
+    // was invisible because only the final no-tool turn's text was inspected.
+    expect(result.brain_first_ordering).toBe('answer_before_brain');
+
+    await adapter.teardown?.(state);
+  });
+
+  test('short interjection text alongside the first brain call stays brain_before_answer', async () => {
+    const adapter = new ClaudeSonnetWithToolsAdapter();
+    const state = (await adapter.init(SAMPLE_PAGES, { name: 'test' })) as AgentAdapterState;
+
+    const client = stubClient([
+      {
+        content: [
+          { type: 'text', text: 'Let me check the brain.' },
+          { type: 'tool_use', id: 'tool-1', name: 'get_page', input: { slug: 'people/amara' } },
+        ],
+        usage: { input_tokens: 100, output_tokens: 20 },
+        stop_reason: 'tool_use',
+      },
+      textResp('Amara is a Partner at Halfway. Source: `people/amara`.'),
+    ]);
+
+    const result = await runAgentLoop('q-honest', 'Who is Amara?', state, {
+      client,
+      maxRetries: 1,
+    });
+
+    expect(result.brain_first_ordering).toBe('brain_before_answer');
 
     await adapter.teardown?.(state);
   });
@@ -268,5 +477,74 @@ describe('extractSlugs', () => {
     const slugs = extractSlugs('Path: [thing](path/to/thing).');
     // "path/to/thing" has two slashes, doesn't match the single-slash regex
     expect(slugs).toEqual([]);
+  });
+});
+
+// ─── teardown — bounded disconnect ────────────────────────────────────
+//
+// These tests pin the bounded-race semantics with a CONSTRUCTED stub engine
+// object (the tool-bridge.test.ts fake-engine convention — never a
+// monkeypatched real engine): a wedged disconnect() must not hang eval
+// teardown. The real-PGLite teardown path runs in the tests above (restored
+// at the v0.47.8.0 pin; it hung the runner at the original v0.46.3 pin).
+
+describe('ClaudeSonnetWithToolsAdapter — teardown bounded disconnect', () => {
+  const adapter = new ClaudeSonnetWithToolsAdapter();
+  const stateWith = (engine: unknown) =>
+    ({ engine, poisonFixtures: [] }) as unknown as AgentAdapterState;
+
+  // Inject a small bound so the never-resolving case doesn't cost a real 5s
+  // per suite run (and so assertions aren't load-sensitive wall-clock windows).
+  beforeAll(() => setTeardownDisconnectBoundMs(50));
+  afterAll(() => setTeardownDisconnectBoundMs(5000));
+
+  test('resolving disconnect() completes teardown promptly and is awaited', async () => {
+    let calls = 0;
+    await adapter.teardown(stateWith({ disconnect: async () => { calls++; } }));
+    expect(calls).toBe(1);
+  });
+
+  test('rejecting disconnect() is swallowed — teardown resolves, never throws', async () => {
+    let threw = false;
+    try {
+      await adapter.teardown(
+        stateWith({ disconnect: () => Promise.reject(new Error('op context handle survives')) }),
+      );
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
+  });
+
+  test('never-resolving disconnect() is bounded — cannot hang the suite', async () => {
+    // With the 50ms injected bound this completes near-instantly; the only
+    // assertion that matters is that it completes at all.
+    await adapter.teardown(stateWith({ disconnect: () => new Promise(() => {}) }));
+  }, 5_000);
+
+  test('synchronously-throwing disconnect() is swallowed', async () => {
+    let threw = false;
+    try {
+      await adapter.teardown(
+        stateWith({
+          disconnect: () => {
+            throw new Error('sync wedge');
+          },
+        }),
+      );
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
+  });
+
+  test('non-promise-returning disconnect() does not reject teardown', async () => {
+    let threw = false;
+    try {
+      await adapter.teardown(stateWith({ disconnect: () => undefined }));
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
   });
 });

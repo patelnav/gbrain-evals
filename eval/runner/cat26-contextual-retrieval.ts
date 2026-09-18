@@ -1,801 +1,807 @@
 /**
- * BrainBench Cat 26 — contextual retrieval modes A/B (v0.40.3.0).
+ * BrainBench Cat 26 — contextual retrieval modes A/B (v0.40.3.0 knob).
  *
- * Headline question: does Anthropic-style contextual retrieval
- * (`title` wrap or `per_chunk_synopsis`) actually improve recall on
- * cross-chunk queries?
+ * FEATURE BOUNDARY — what is under test vs what is scaffolding:
  *
- * Fixed corpus selected from the committed world-v1 fixtures.
+ *   UNDER TEST: gbrain's contextual-retrieval embedding wrap on the inline
+ *     import path — the `search.contextual_retrieval` config knob resolved
+ *     through loadSearchModeConfig/resolveSearchMode (mode.ts), consumed by
+ *     importFromContent (resolveContextualRetrievalMode → buildContextualPrefix
+ *     → wrapChunkForEmbedding), and its downstream effect on hybridSearch
+ *     ranking. Stored chunk_text stays canonical; only the embedding input is
+ *     wrapped, so mode deltas come from the vector leg of RRF fusion.
  *
- * Flow:
- *   1. Fixed corpus (15 existing world-v1 pages).
- *   2. Three modes: none, title, per_chunk_synopsis.
- *   3. Grounded queries with gold slugs across people, companies, and meetings.
- *   4. For each (mode, query) measure MRR and Recall@1, Recall@5, and Recall@10.
- *   5. Report mode-vs-mode deltas.
+ *   SEEDED / STUBBED (legitimately):
+ *     - A deterministic 30-page corpus generated in-file (10 gold pages with
+ *       the answer sentence buried in a chunk that does NOT contain the page
+ *       title, + 20 keyword-rich distractor pages). No randomness anywhere.
+ *     - Under --stub-embed: gbrain's embed transport is replaced with a
+ *       deterministic token-bag hash embedding (__setEmbedTransportForTests
+ *       + OPENAI_API_KEY=dummy). This preserves the contrast under test —
+ *       the wrap changes the embed INPUT string — but does NOT measure real
+ *       embedding-model quality, so stub runs are publishable:false.
+ *     - No LLM runs in any mode.
  *
- * BenchRouter repository_executable mode (`--benchrouter` or
- * BENCHROUTER_EXEC_RESULT_PATH) runs a fixed title baseline and the routed
- * synopsis candidate:
- *   - Synopsis uses gbrain native Anthropic Messages via ANTHROPIC_BASE_URL
- *   - Outbound model is `anthropic:<route-id>` (the server binds the candidate)
- *   - ANTHROPIC_API_KEY is the server-issued ephemeral eval token from the kit
- *   - Embeddings stay on google:gemini-embedding-001 at 1,536 dimensions
- *   - No fetch wrapper, client-forged headers, or echoed model-call IDs
- *   - Synopsis page_fallback fails the eval
- *   - Writes benchrouter.executable_result.v1 to result_path
+ *   NOT EXERCISED: per-chunk synopsis GENERATION. gbrain's inline import
+ *     path hard-forces per_chunk_synopsis down to the title tier
+ *     (import-file.ts: "per_chunk_synopsis is too expensive for the inline
+ *     import path"; the Minion backfill owns the real synopsis sweep). The
+ *     'per_chunk_synopsis' cell therefore measures the requested-mode
+ *     CONFIG PLUMBING with title-tier effect, and the receipt labels it
+ *     `mode_effective_inline: 'title'` (audit finding cats26-29-16 — never
+ *     present it as a measured synopsis number).
+ *
+ * HISTORY (audit findings cats26-29-01/-02): the previous version set the
+ * knob under the bare key 'contextual_retrieval' — gbrain only reads
+ * 'search.contextual_retrieval' (mode.ts SEARCH_MODE_CONFIG_KEYS) — so all
+ * three cells ran identically at the balanced default ('title'); and the
+ * corpus was 3 pages scored at K=10, so recall was structurally 1.0. This
+ * version asserts the RESOLVED mode per cell before ingest (abort on
+ * mismatch), scores R@3 / MRR via eval/runner/metrics.ts over a 30-page
+ * corpus, and adds a mismatched-gold headroom control.
+ *
+ * GATES (real + failable):
+ *   - config conformance: resolveSearchMode(loadSearchModeConfig(engine))
+ *     .contextual_retrieval must equal the requested mode per cell (abort,
+ *     exit 2 otherwise — this is exactly the bug class of finding -01).
+ *   - corpus premises: every gold page chunks to >= 2 chunks AND the chunk
+ *     containing the gold sentence does not contain the page's name token
+ *     (otherwise "context is missing from the chunk" is not being tested).
+ *   - headroom (negative control): scoring the best cell against ROTATED
+ *     gold labels must yield <= 0.5 × its real mean R@3, and the real mean
+ *     must be > 0. A saturated corpus (the old 3-page bug) fails this.
+ *   - inline-fallback conformance (stub mode only, deterministic): the
+ *     per_chunk_synopsis cell must score identically to the title cell,
+ *     because gbrain documents the inline fallback. If gbrain ever starts
+ *     exercising real synopsis inline, this fails loudly and the eval gets
+ *     updated instead of silently mislabeling.
+ *
+ * best_mode uses a STRICT tie-break: equal means report 'tie' (+ the tied
+ * list) instead of deterministically crowning the first cell (finding -02).
  *
  * Run:
- *   bun eval/runner/cat26-contextual-retrieval.ts
- *   bun eval/runner/cat26-contextual-retrieval.ts --benchrouter
- *   bun eval/runner/cat26-contextual-retrieval.ts --validate
+ *   bun eval/runner/cat26-contextual-retrieval.ts --stub-embed   # hermetic, no keys
+ *   bun eval/runner/cat26-contextual-retrieval.ts                # live OpenAI embeds (OPENAI_API_KEY)
+ *   bun eval/runner/cat26-contextual-retrieval.ts --allow-skip   # missing key → skip receipt, exit 0
  */
 
-import { writeFileSync, mkdirSync, readFileSync, readdirSync } from 'fs';
-import { homedir } from 'os';
-import { join } from 'path';
+import { createHash } from 'crypto';
+import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { tmpdir } from 'os';
+import { fileURLToPath } from 'url';
 import { PGLiteEngine } from 'gbrain/pglite-engine';
 import { importFromContent } from 'gbrain/import-file';
-import { configureGateway } from 'gbrain/ai/gateway';
+import { configureGateway, __setEmbedTransportForTests } from 'gbrain/ai/gateway';
 import { hybridSearch } from 'gbrain/search/hybrid';
-import { reembedPageWithContextualRetrieval } from '../../node_modules/gbrain/src/core/contextual-retrieval-service.ts';
-import { recallAtK, type RankedDoc } from './types.ts';
+// Not in gbrain's export map (unlike 'gbrain/think'); deep import is the only
+// way to reach the mode resolver this eval must assert against.
+import { loadSearchModeConfig, resolveSearchMode } from '../../node_modules/gbrain/src/core/search/mode.ts';
+import { uniqueInOrder, recallAtK, reciprocalRank } from './metrics.ts';
+import { ProbeAccounting } from './probe-accounting.ts';
+import {
+  writeReceipt,
+  receiptPath,
+  RECEIPT_SCHEMA_VERSION,
+  BENCHMARK_VERSION,
+  type Receipt,
+  type ReceiptVerdict,
+} from './receipt.ts';
+import { gbrainVersion, gbrainPin } from './gbrain-version.ts';
 
-const CORPUS_PATH = 'eval/data/cat26-contextual-retrieval/corpus.json';
-const QUERIES_PATH = 'eval/data/cat26-contextual-retrieval/queries.json';
-const EVAL_PACK_PATH = '.benchrouter/contextual-synopsis-eval-pack.json';
-const ROUTE_ID = 'gbrain-evals/contextual-synopsis';
-const INCUMBENT_SYNOPSIS_MODEL = 'anthropic:claude-haiku-4-5-20251001';
-const EMBEDDING_MODEL = 'google:gemini-embedding-001';
-const EMBEDDING_DIM = 1536;
-const PRIMARY_METRIC = 'mrr';
+// Isolate GBRAIN_HOME so a developer's ~/.gbrain/config.json can't leak in.
+const ISOLATED_HOME = join(tmpdir(), `cat26-gbrain-home-${process.pid}-${Date.now()}`);
+mkdirSync(ISOLATED_HOME, { recursive: true });
+process.env.GBRAIN_HOME = ISOLATED_HOME;
 
-const MIN_PAGES = 12;
-const MIN_QUERIES = 24;
-const MIN_TOTAL_CHUNKS = 15;
-const MIN_CONTEXTUAL_GOLD_PAGES = 12;
-const MIN_MULTICHUNK_GOLD_PAGES = 4;
+export const CATEGORY = 'cat26-contextual-retrieval';
+export const K = 3;
 
-interface CorpusPage {
+export type Mode = 'none' | 'title' | 'per_chunk_synopsis';
+export const MODES: Mode[] = ['none', 'title', 'per_chunk_synopsis'];
+
+// ─── Deterministic corpus ────────────────────────────────────────────
+// 10 gold pages: the page name lives in the H1 + the first paragraph ONLY;
+// the gold sentence sits past the first chunk boundary in name-free text.
+// Queries combine the page name (only recoverable from chunk context under
+// the title wrap) with topic keywords the distractors also use heavily.
+// 20 distractors: chunk 1 = intro naming OTHER companies (spreads name
+// tokens so names alone can't solve a query), chunk 2 = keyword-dense
+// name-free text overlapping every query's topic vocabulary.
+
+interface GoldSpec {
   slug: string;
-  title: string;
+  name: string;
+  sector: string;
+  gold_sentence: string;
+  query: string;
+  /** Distinctive lowercase token of the name; must be ABSENT from the gold chunk. */
+  name_token: string;
+}
+
+export const GOLD_SPECS: GoldSpec[] = [
+  {
+    slug: 'companies/meridian-circuits', name: 'Meridian Circuits', sector: 'power-electronics',
+    gold_sentence: 'The Series A round was led by Halvorsen Capital, whose partner took the board seat after the close.',
+    query: 'who led the Series A round for Meridian Circuits', name_token: 'meridian',
+  },
+  {
+    slug: 'companies/halcyon-grid', name: 'Halcyon Grid', sector: 'grid-software',
+    gold_sentence: 'The chief financial officer is Tomas Reyes, who previously ran finance at a national utility.',
+    query: 'who is the CFO of Halcyon Grid', name_token: 'halcyon',
+  },
+  {
+    slug: 'companies/bluepine-robotics', name: 'Bluepine Robotics', sector: 'warehouse-robotics',
+    gold_sentence: 'The picking system was trained on forty terabytes of bin picking demonstrations collected over two years.',
+    query: 'how much training data does the Bluepine Robotics picking system use', name_token: 'bluepine',
+  },
+  {
+    slug: 'companies/cobalt-harbor', name: 'Cobalt Harbor', sector: 'fleet-telematics',
+    gold_sentence: 'Enterprise pricing starts at sixty thousand dollars per year for the fleet tier with volume discounts above two hundred vehicles.',
+    query: 'what does the Cobalt Harbor enterprise fleet tier cost', name_token: 'cobalt',
+  },
+  {
+    slug: 'companies/sable-peak', name: 'Sable Peak Analytics', sector: 'product-analytics',
+    gold_sentence: 'The retention dashboard refreshes every fifteen minutes from the event stream with no manual rebuild step.',
+    query: 'how often does the Sable Peak retention dashboard refresh', name_token: 'sable',
+  },
+  {
+    slug: 'companies/juniper-forge', name: 'Juniper Forge', sector: 'metal-additive',
+    gold_sentence: 'The seed round closed at four million dollars with Redgate Ventures leading and two operator angels participating.',
+    query: 'who led the seed round for Juniper Forge', name_token: 'juniper',
+  },
+  {
+    slug: 'companies/quartz-meadow', name: 'Quartz Meadow Bio', sector: 'biotech',
+    gold_sentence: 'The lead molecule targets fibrosis in the liver and enters first clinical trials next spring.',
+    query: 'what disease does the Quartz Meadow lead molecule target', name_token: 'quartz',
+  },
+  {
+    slug: 'companies/ember-line', name: 'Ember Line Freight', sector: 'logistics',
+    gold_sentence: 'The routing engine cut average delivery time by nineteen percent across the three month pilot.',
+    query: 'how much did the Ember Line routing engine cut delivery time', name_token: 'ember',
+  },
+  {
+    slug: 'companies/willow-array', name: 'Willow Array', sector: 'solar-hardware',
+    gold_sentence: 'The inverter ships with a twelve year warranty on the power stage and a five year warranty on the enclosure.',
+    query: 'how long is the Willow Array inverter warranty', name_token: 'willow',
+  },
+  {
+    slug: 'companies/onyx-current', name: 'Onyx Current', sector: 'ev-batteries',
+    gold_sentence: 'The battery pack holds ninety kilowatt hours and charges to eighty percent in under forty minutes.',
+    query: 'how big is the Onyx Current battery pack', name_token: 'onyx',
+  },
+];
+
+const DISTRACTOR_NAMES = [
+  'Argent Systems', 'Bristlecone Works', 'Cinder Path', 'Dovetail Metrics', 'Eastlake Dynamo',
+  'Fernwood Labs', 'Gantry Nine', 'Harrow Point', 'Ironquill', 'Jetty Row',
+  'Kestrel Loop', 'Lantern Field', 'Mosswood Data', 'Northbank Forge', 'Ossify',
+  'Pinewheel', 'Quill Harbor', 'Rooksmith', 'Stonebriar Ops', 'Tidegate',
+];
+
+// Name-free neutral operations filler. Cycled deterministically per page.
+const FILLER_SENTENCES = [
+  'The operations team reviews weekly planning notes every Monday morning before standup.',
+  'Hiring loops run in two stages with a written exercise reviewed asynchronously by the panel.',
+  'Quarterly planning documents are drafted collaboratively and archived in the shared workspace.',
+  'The onboarding checklist covers accounts, hardware, and a first-week shadowing rotation.',
+  'Support rotations run in weekly shifts with a handoff document updated each Friday.',
+  'The internal wiki holds runbooks for deploys, incident response, and vendor escalation.',
+  'Office hours with the founding team happen twice a month and notes are circulated afterward.',
+  'Expense policy requires receipts within thirty days and manager approval above a small threshold.',
+  'The design review meeting alternates between product walkthroughs and technical deep dives.',
+  'All-hands meetings close with a questions segment sourced from an anonymous form.',
+  'Engineering pairs rotate every sprint so context spreads beyond the original authors.',
+  'Customer interview recordings are summarized into a searchable digest every other week.',
+  'The security checklist is re-audited each quarter and findings tracked to closure.',
+  'Performance reviews use a lightweight written packet rather than live presentation.',
+  'Travel bookings route through a single agency to keep reporting consolidated.',
+  'The documentation style guide asks for short sentences and concrete examples.',
+];
+
+// Name-free keyword-dense text overlapping every query's topic vocabulary.
+// Lives in distractor chunk 2 so distractors compete on content tokens.
+const DISTRACTOR_KEYWORD_SENTENCES = [
+  'The Series A round discussion covered which fund led and how the board seat was allocated.',
+  'A fractional CFO handles finance reporting while the search for a full time chief financial officer continues.',
+  'The picking system roadmap debates how much training data the warehouse demonstrations should contribute.',
+  'Enterprise pricing conversations keep circling the fleet tier and what the annual cost per vehicle should be.',
+  'The retention dashboard project tracks how often the metrics refresh from the event stream.',
+  'Notes from the seed round retro cover which ventures firm led and how the close was sequenced.',
+  'The research memo compares lead molecule candidates and which disease each targets before clinical trials.',
+  'The routing engine experiment measures how much average delivery time improves during a pilot.',
+  'Warranty policy drafts propose how long the inverter power stage coverage should run.',
+  'The battery pack spec sheet argues about kilowatt hours of capacity and charge time targets.',
+];
+
+function cycleSentences(bank: string[], startIdx: number, minWords: number): string {
+  const out: string[] = [];
+  let words = 0;
+  let i = startIdx;
+  while (words < minWords) {
+    const s = bank[i % bank.length]!;
+    out.push(s);
+    words += s.split(/\s+/).length;
+    i++;
+  }
+  return out.join(' ');
+}
+
+function slugSeed(slug: string): number {
+  return createHash('sha256').update(slug).digest().readUInt16BE(0);
+}
+
+export interface CorpusPage {
+  slug: string;
   body: string;
-  type: 'person' | 'company' | 'meeting';
+  kind: 'gold' | 'distractor';
 }
 
-interface CorpusFile {
-  schema_version: number;
-  source: 'world-v1';
-  page_refs: string[];
-}
-
-interface WorldPage {
-  slug: string;
-  title: string;
-  type: 'person' | 'company' | 'meeting';
-  compiled_truth: string;
-  timeline?: string;
-}
-
-interface LoadedCorpus {
-  pages: CorpusPage[];
-  pageRefs: string[];
-}
-
-interface QuerySpec {
+export interface CorpusQuery {
   id: string;
   query: string;
-  relevant_slugs: string[];
+  gold_slug: string;
 }
 
-interface QueriesFile {
-  schema_version: number;
-  queries: QuerySpec[];
-}
+export function buildCorpus(): { pages: CorpusPage[]; queries: CorpusQuery[] } {
+  const pages: CorpusPage[] = [];
 
-interface EvalPack {
-  mode: string;
-  id?: string;
-  primary_metric: string;
-  result_path: string;
-  max_model_calls: number;
-  input_refs: string[];
-  acceptance_refs: string[];
-  case_refs?: string[];
-  secret_env?: string[];
-  lockfile?: string;
-  result_schema?: string;
-}
-
-type Mode = 'none' | 'title' | 'per_chunk_synopsis';
-
-interface ModeResult {
-  mode: Mode;
-  per_query_recall_at_1: number[];
-  per_query_recall_at_5: number[];
-  per_query_recall_at_10: number[];
-  per_query_mrr: number[];
-  mean_recall_at_1: number;
-  mean_recall_at_5: number;
-  mean_recall_at_10: number;
-  mean_mrr: number;
-}
-
-interface Receipt {
-  schema_version: 1;
-  cat: 'cat26-contextual-retrieval';
-  gbrain_version: string;
-  timestamp: string;
-  corpus_pages: number;
-  queries: number;
-  modes: ModeResult[];
-  best_mode: Mode;
-  title_vs_none_delta_mrr: number;
-  synopsis_vs_title_delta_mrr: number;
-  none_vs_title_delta_at_5: number;
-  none_vs_synopsis_delta_at_5: number;
-  none_vs_title_delta_at_10: number;
-  none_vs_synopsis_delta_at_10: number;
-}
-
-interface BenchRouterExecutableResult {
-  schema_version: 'benchrouter.executable_result.v1';
-  primary_metric: { name: string; score: number };
-  metrics: Record<string, number>;
-}
-
-interface ParsedArgs {
-  help: boolean;
-  validate: boolean;
-  benchrouter: boolean;
-  modes: Mode[];
-  resultPath?: string;
-}
-
-interface FixtureStats {
-  totalChunks: number;
-  perPageChunks: Record<string, number>;
-}
-
-function parseArgs(argv: string[]): ParsedArgs {
-  const out: ParsedArgs = {
-    help: false,
-    validate: false,
-    benchrouter: false,
-    modes: ['none', 'title', 'per_chunk_synopsis'],
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === '--help' || arg === '-h') out.help = true;
-    else if (arg === '--validate') out.validate = true;
-    else if (arg === '--benchrouter') out.benchrouter = true;
-    else if (arg === '--modes') out.modes = argv[++i].split(',').map(s => s.trim()) as Mode[];
-    else if (arg === '--result-path') out.resultPath = argv[++i];
+  for (const g of GOLD_SPECS) {
+    const seed = slugSeed(g.slug);
+    // The name lives in the H1 + intro only. ~650 words of name-free filler
+    // push the gold sentence several chunk boundaries away (the recursive
+    // chunker merges past its 300-word target and applies overlap, so a
+    // short gap would leak the name into the gold chunk).
+    const intro = `${g.name} is a ${g.sector} company. ${g.name} keeps most of its working notes in this page.`;
+    const fillerA = cycleSentences(FILLER_SENTENCES, seed % FILLER_SENTENCES.length, 650);
+    // Keep the gold chunk lean: heavy filler around the gold sentence
+    // dilutes its token-level similarity and drowns the mode contrast.
+    const fillerB = cycleSentences(FILLER_SENTENCES, (seed + 5) % FILLER_SENTENCES.length, 30);
+    const fillerC = cycleSentences(FILLER_SENTENCES, (seed + 9) % FILLER_SENTENCES.length, 30);
+    const body = [
+      `# ${g.name}`, '',
+      intro, '',
+      fillerA, '',
+      fillerB, '',
+      g.gold_sentence, '',
+      fillerC, '',
+    ].join('\n');
+    pages.push({ slug: g.slug, body, kind: 'gold' });
   }
-  if (process.env.BENCHROUTER_EXEC_RESULT_PATH) {
-    out.benchrouter = true;
-    out.resultPath = process.env.BENCHROUTER_EXEC_RESULT_PATH;
-    out.modes = ['per_chunk_synopsis'];
-  }
-  return out;
-}
 
-function printHelp(): void {
-  process.stderr.write(
-    'cat26-contextual-retrieval — fixed-corpus contextual retrieval benchmark\n\n' +
-    'Usage:\n' +
-    '  bun eval/runner/cat26-contextual-retrieval.ts [--validate]\n' +
-    '  bun eval/runner/cat26-contextual-retrieval.ts --benchrouter [--result-path PATH]\n' +
-    '  bun eval/runner/cat26-contextual-retrieval.ts --modes none,title\n\n' +
-    'Flags:\n' +
-    '  --validate       Check corpus, queries, eval-pack, and chunk invariants (no network)\n' +
-    '  --benchrouter    BenchRouter repository_executable mode (title baseline + synopsis candidate)\n' +
-    '  --result-path    Override benchrouter.executable_result.v1 output path\n' +
-    '  --modes          Comma-separated modes (default: none,title,per_chunk_synopsis)\n',
-  );
-}
-
-function validateModeList(modes: Mode[]): void {
-  const allowed = new Set<Mode>(['none', 'title', 'per_chunk_synopsis']);
-  if (modes.length === 0) throw new Error('--modes must include at least one mode');
-  if (new Set(modes).size !== modes.length) throw new Error('--modes must not contain duplicates');
-  for (const mode of modes) {
-    if (!allowed.has(mode)) throw new Error(`unknown contextual retrieval mode: ${mode}`);
-  }
-}
-
-function loadCorpus(): LoadedCorpus {
-  const raw = JSON.parse(readFileSync(CORPUS_PATH, 'utf8')) as CorpusFile;
-  if (raw.source !== 'world-v1' || !Array.isArray(raw.page_refs) || raw.page_refs.length === 0) {
-    throw new Error(`${CORPUS_PATH}: expected a non-empty world-v1 page_refs array`);
-  }
-  const pages = raw.page_refs.map((ref): CorpusPage => {
-    const page = JSON.parse(readFileSync(ref, 'utf8')) as WorldPage;
-    if (!page.slug?.trim() || !page.title?.trim() || !page.compiled_truth?.trim()) {
-      throw new Error(`${ref}: expected slug, title, and compiled_truth`);
-    }
-    if (page.type !== 'person' && page.type !== 'company' && page.type !== 'meeting') {
-      throw new Error(`${ref}: expected a person, company, or meeting fixture (got ${String(page.type)})`);
-    }
-    const timeline = page.timeline?.trim();
-    return {
-      slug: page.slug,
-      title: page.title,
-      type: page.type,
-      body: timeline
-        ? `${page.compiled_truth}\n\n## Timeline\n\n${timeline}`
-        : page.compiled_truth,
-    };
+  DISTRACTOR_NAMES.forEach((name, di) => {
+    const slug = `companies/${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
+    const seed = slugSeed(slug);
+    // Mention 2 gold-company names in the intro chunk (spreads name tokens),
+    // never in the keyword chunk.
+    const m1 = GOLD_SPECS[di % GOLD_SPECS.length]!.name;
+    const m2 = GOLD_SPECS[(di + 3) % GOLD_SPECS.length]!.name;
+    const intro = `${name} is an operations-heavy company. The team tracks competitors including ${m1} and ${m2} in a separate research digest.`;
+    // ~600 words of filler so the trailing keyword section lands in its own
+    // LEAN chunk (mirrors the gold pages' lean gold chunk — distractors must
+    // compete at comparable dilution or the contrast is an artifact).
+    const fillerA = cycleSentences(FILLER_SENTENCES, seed % FILLER_SENTENCES.length, 600);
+    // Each distractor covers a rotating window of 3 query topics (so every
+    // topic gets ~6 keyword-competing distractors without any single
+    // distractor being a universal keyword magnet).
+    const keywords = [0, 1, 2]
+      .map(o => DISTRACTOR_KEYWORD_SENTENCES[(di + o) % DISTRACTOR_KEYWORD_SENTENCES.length]!)
+      .join(' ');
+    const body = [
+      `# ${name}`, '',
+      intro, '',
+      fillerA, '',
+      keywords, '',
+    ].join('\n');
+    pages.push({ slug, body, kind: 'distractor' });
   });
-  return { pages, pageRefs: raw.page_refs };
+
+  const queries: CorpusQuery[] = GOLD_SPECS.map((g, i) => ({
+    id: `q${String(i + 1).padStart(2, '0')}-${g.name_token}`,
+    query: g.query,
+    gold_slug: g.slug,
+  }));
+
+  return { pages, queries };
 }
 
-function loadQueries(): QuerySpec[] {
-  const raw = JSON.parse(readFileSync(QUERIES_PATH, 'utf8')) as QueriesFile;
-  if (!Array.isArray(raw.queries) || raw.queries.length === 0) {
-    throw new Error(`${QUERIES_PATH}: missing queries array`);
+// ─── Gateway (+ optional deterministic hash-embed transport) ─────────
+
+const EMBED_DIMS = 1536;
+
+// Function words the synthetic embedder drops. Real embedding models learn
+// to downweight these; a bag-of-tokens toy must do it explicitly or query
+// stopwords ('the', 'for', 'how') dominate every similarity.
+const EMBED_STOPWORDS = new Set([
+  'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'of', 'in',
+  'on', 'at', 'to', 'for', 'with', 'and', 'or', 'who', 'what', 'when',
+  'where', 'why', 'how', 'much', 'many', 'does', 'do', 'did', 'this',
+  'that', 'these', 'those', 'by', 'from', 'as', 'it', 'its', 'which',
+  'should', 'would', 'could', 'their', 'they', 'we', 'our', 'us', 'i',
+  'you', 'your', 'about', 'above', 'under', 'over', 'per', 'each', 'every',
+]);
+
+export function hashEmbed(text: string): number[] {
+  const vec = new Array<number>(EMBED_DIMS).fill(0);
+  // UNIQUE content-token presence (not counts): repeated filler must not
+  // dominate the vector, or the title wrap's few added tokens can never
+  // move a ranking and the A/B loses its contrast. All-positive weights
+  // (no ± sign) so hash collisions never CANCEL a genuine token match —
+  // signed variants add rank noise at exactly the margins under test.
+  const tokens = new Set(
+    text.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 0 && !EMBED_STOPWORDS.has(t)),
+  );
+  for (const tok of tokens) {
+    const h = createHash('sha256').update(tok).digest();
+    const idx = h.readUInt32BE(0) % EMBED_DIMS;
+    vec[idx] += 1;
   }
-  return raw.queries;
+  const norm = Math.sqrt(vec.reduce((a, b) => a + b * b, 0)) || 1;
+  return vec.map(x => x / norm);
 }
 
-function loadEvalPack(): EvalPack {
-  const raw = JSON.parse(readFileSync(EVAL_PACK_PATH, 'utf8')) as EvalPack;
-  if (raw.mode !== 'repository_executable') {
-    throw new Error(`${EVAL_PACK_PATH}: mode must be repository_executable`);
+async function hashEmbedTransport(
+  params: { values: string[] } & Record<string, unknown>,
+): Promise<{ embeddings: number[][]; values: string[]; warnings: unknown[]; usage: { tokens: number } }> {
+  return {
+    embeddings: params.values.map(v => hashEmbed(v)),
+    values: params.values,
+    warnings: [],
+    usage: { tokens: 0 },
+  };
+}
+
+let gatewayMode: 'stub' | 'live' | null = null;
+export function ensureGateway(stubEmbed: boolean): void {
+  const want = stubEmbed ? 'stub' : 'live';
+  if (gatewayMode === want) return;
+  if (stubEmbed && !process.env.OPENAI_API_KEY) {
+    // ai-sdk model construction needs a non-empty key even when the transport
+    // is stubbed; the dummy never reaches the network.
+    process.env.OPENAI_API_KEY = 'dummy-embed-transport-stubbed';
   }
-  return raw;
-}
-
-function normalizeAnthropicBaseUrl(raw: string): string {
-  const trimmed = raw.replace(/\/+$/, '');
-  return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
-}
-
-let benchRouterRoutingInstalled = false;
-
-/**
- * Configure native Anthropic routing for the repository executable. The kit
- * exposes the server-issued model-call token as an environment value. The
- * token is used as the normal SDK API key, so the server owns route and call
- * attribution without a client-side fetch or response-header shim.
- */
-function installBenchRouterSynopsisRouting(): void {
-  if (benchRouterRoutingInstalled) return;
-
-  const evalBaseRaw = process.env.BENCHROUTER_EVAL_BASE_URL?.trim();
-  if (!evalBaseRaw) {
-    throw new Error('BENCHROUTER_EVAL_BASE_URL is required in --benchrouter mode');
-  }
-  const evalBaseUrl = normalizeAnthropicBaseUrl(evalBaseRaw);
-  process.env.ANTHROPIC_BASE_URL = evalBaseUrl;
-  const evalToken = process.env.BENCHROUTER_API_KEY?.trim();
-  if (!evalToken || !evalToken.startsWith('ecall_')) {
-    throw new Error(
-      'BenchRouter mode requires the server-issued ecall_ token in BENCHROUTER_API_KEY',
-    );
-  }
-  process.env.ANTHROPIC_API_KEY = evalToken;
-  benchRouterRoutingInstalled = true;
-}
-
-/**
- * Outbound synopsis model for BenchRouter: Anthropic transport + route id body.
- * Candidate identity is bound by the server-issued eval token.
- */
-function resolveSynopsisModel(benchrouter: boolean): string {
-  if (benchrouter) {
-    return `anthropic:${ROUTE_ID}`;
-  }
-  return process.env.GBRAIN_CONTEXTUAL_SYNOPSIS_MODEL ?? INCUMBENT_SYNOPSIS_MODEL;
-}
-
-function configureEmbeddingGateway(): void {
   configureGateway({
-    embedding_model: EMBEDDING_MODEL,
-    embedding_dimensions: EMBEDDING_DIM,
+    embedding_model: 'openai:text-embedding-3-large',
+    embedding_dimensions: EMBED_DIMS,
     env: process.env as Record<string, string | undefined>,
   });
+  __setEmbedTransportForTests(
+    stubEmbed
+      ? (hashEmbedTransport as unknown as Parameters<typeof __setEmbedTransportForTests>[0])
+      : null,
+  );
+  gatewayMode = want;
 }
 
-function toRankedDocs(results: Array<{ slug: string; score?: number }>): RankedDoc[] {
-  const seen = new Set<string>();
-  const docs: RankedDoc[] = [];
-  for (const result of results) {
-    if (seen.has(result.slug)) continue;
-    seen.add(result.slug);
-    docs.push({
-      page_id: result.slug,
-      score: typeof result.score === 'number' ? result.score : 0,
-      rank: docs.length + 1,
-    });
-  }
-  return docs;
+// ─── WS5 config pinning + conformance ────────────────────────────────
+// Pinned per cell BEFORE ingest. 'balanced' would silently enable the
+// zerank-2 reranker when ZEROENTROPY_API_KEY is set — never rely on defaults.
+
+const BASE_SEARCH_CONFIG: Record<string, string> = {
+  'search.mode': 'balanced',
+  'search.reranker.enabled': 'false',
+  'search.expansion': 'false',
+  'search.cache.enabled': 'false',
+};
+
+export interface ResolvedCellConfig {
+  mode_requested: Mode;
+  /** What the inline import path actually applies (synopsis → title). */
+  mode_effective_inline: Mode | 'title';
+  resolved_mode: string;
+  contextual_retrieval: string;
+  contextual_retrieval_disabled: boolean;
+  reranker_enabled: boolean;
+  expansion: boolean;
 }
 
-async function importFixturePages(
-  engine: PGLiteEngine,
-  pages: CorpusPage[],
-  opts: { noEmbed: boolean },
-): Promise<FixtureStats> {
-  const perPageChunks: Record<string, number> = {};
-  let totalChunks = 0;
-  for (const page of pages) {
-    const body = `# ${page.title}\n\n${page.body}\n`;
-    const imported = await importFromContent(engine, page.slug, body, { noEmbed: opts.noEmbed });
-    if (imported.status !== 'imported') {
-      throw new Error(
-        `fixture import failed for ${page.slug}: ${imported.status}${imported.error ? ` (${imported.error})` : ''}`,
-      );
-    }
-    const storedPage = await engine.getPage(page.slug, { sourceId: 'default' });
-    if (!storedPage) {
-      throw new Error(`fixture import did not persist page ${page.slug}`);
-    }
-    const chunks = await engine.getChunks(page.slug, { sourceId: 'default' });
-    if (chunks.length === 0) {
-      throw new Error(`fixture import produced no chunks for ${page.slug}`);
-    }
-    perPageChunks[page.slug] = chunks.length;
-    totalChunks += chunks.length;
-  }
-  return { totalChunks, perPageChunks };
+/** Re-read the knob the way gbrain does (finding cats26-29-01: the old runner
+ *  set a bare key gbrain never reads; this assertion makes that impossible). */
+export async function resolveEffectiveConfig(engine: PGLiteEngine, requested: Mode): Promise<ResolvedCellConfig> {
+  const knobs = resolveSearchMode(await loadSearchModeConfig(engine));
+  return {
+    mode_requested: requested,
+    mode_effective_inline: requested === 'per_chunk_synopsis' ? 'title' : requested,
+    resolved_mode: knobs.resolved_mode,
+    contextual_retrieval: knobs.contextual_retrieval,
+    contextual_retrieval_disabled: knobs.contextual_retrieval_disabled,
+    reranker_enabled: knobs.reranker_enabled,
+    expansion: knobs.expansion,
+  };
 }
 
-async function measureFixtureChunks(pages: CorpusPage[]): Promise<FixtureStats> {
-  const engine = new PGLiteEngine() as PGLiteEngine;
-  try {
-    await engine.connect({});
-    await engine.initSchema();
-    return await importFixturePages(engine, pages, { noEmbed: true });
-  } finally {
-    await engine.disconnect();
-  }
-}
+export class ConfigConformanceError extends Error {}
+export class CorpusPremiseError extends Error {}
 
-function validateEvalPackContract(pack: EvalPack): void {
-  if (pack.primary_metric !== PRIMARY_METRIC) {
-    throw new Error(`eval-pack primary_metric must be ${PRIMARY_METRIC}, got ${pack.primary_metric}`);
-  }
-  if (pack.result_schema && pack.result_schema !== 'benchrouter.executable_result.v1') {
-    throw new Error('eval-pack result_schema must be benchrouter.executable_result.v1');
-  }
-  if (!pack.result_path?.trim()) {
-    throw new Error('eval-pack result_path is required');
-  }
-  if (!Number.isFinite(pack.max_model_calls) || pack.max_model_calls <= 0) {
-    throw new Error('eval-pack max_model_calls must be a positive number');
-  }
-  if (!Array.isArray(pack.input_refs) || pack.input_refs.length === 0) {
-    throw new Error('eval-pack input_refs must be a non-empty array');
-  }
-  if (!Array.isArray(pack.acceptance_refs) || pack.acceptance_refs.length === 0) {
-    throw new Error('eval-pack acceptance_refs must be a non-empty array');
-  }
-  for (const ref of pack.input_refs) {
-    if (pack.acceptance_refs.includes(ref)) {
-      throw new Error(`eval-pack input_refs and acceptance_refs must be disjoint; both list ${ref}`);
-    }
-  }
-  if (pack.secret_env?.includes('ANTHROPIC_API_KEY')) {
-    throw new Error('eval-pack secret_env must not require ANTHROPIC_API_KEY');
-  }
-  if (!pack.secret_env?.includes('GOOGLE_GENERATIVE_AI_API_KEY')) {
-    throw new Error('eval-pack secret_env must require GOOGLE_GENERATIVE_AI_API_KEY');
-  }
-  if (pack.secret_env?.includes('OPENAI_API_KEY')) {
-    throw new Error('eval-pack secret_env must not require OPENAI_API_KEY');
-  }
-  if (pack.lockfile) readFileSync(pack.lockfile, 'utf8');
-}
+// ─── Corpus premise checks ───────────────────────────────────────────
 
-function validateQueries(queries: QuerySpec[], pages: CorpusPage[]): void {
-  const slugs = new Set(pages.map(p => p.slug));
-  const ids = new Set<string>();
-  for (const q of queries) {
-    if (!q.id?.trim()) throw new Error('each query requires a non-empty id');
-    if (ids.has(q.id)) throw new Error(`duplicate query id: ${q.id}`);
-    ids.add(q.id);
-    if (!q.query?.trim()) throw new Error(`query ${q.id} requires non-empty query text`);
-    if (!Array.isArray(q.relevant_slugs) || q.relevant_slugs.length === 0) {
-      throw new Error(`query ${q.id} requires at least one relevant_slug`);
+async function assertCorpusPremises(engine: PGLiteEngine): Promise<{ gold_chunk_counts: Record<string, number> }> {
+  const counts: Record<string, number> = {};
+  for (const g of GOLD_SPECS) {
+    const rows = await engine.executeRaw<{ chunk_text: string }>(
+      `SELECT cc.chunk_text
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = $1
+        ORDER BY cc.chunk_index`,
+      [g.slug],
+    );
+    counts[g.slug] = rows.length;
+    if (rows.length < 2) {
+      throw new CorpusPremiseError(`gold page ${g.slug} produced ${rows.length} chunk(s); need >= 2 so the gold sentence can sit outside the title chunk`);
     }
-    for (const slug of q.relevant_slugs) {
-      if (!slugs.has(slug)) {
-        throw new Error(`query ${q.id} references unknown slug: ${slug}`);
+    const goldNeedle = g.gold_sentence.split(' ').slice(0, 5).join(' ');
+    // Chunk overlap can duplicate the gold sentence into a neighbor; the
+    // premise must hold for EVERY chunk that carries it.
+    const goldChunks = rows.filter(r => r.chunk_text.includes(goldNeedle));
+    if (goldChunks.length === 0) {
+      throw new CorpusPremiseError(`gold page ${g.slug}: no chunk contains the gold sentence`);
+    }
+    for (const c of goldChunks) {
+      if (c.chunk_text.toLowerCase().includes(g.name_token)) {
+        throw new CorpusPremiseError(`gold page ${g.slug}: a chunk carrying the gold sentence also contains the name token "${g.name_token}" — the buried-context premise is void`);
       }
     }
   }
+  return { gold_chunk_counts: counts };
 }
 
-function validateFixtureInvariants(pages: CorpusPage[], queries: QuerySpec[], stats: FixtureStats): void {
-  if (pages.length < MIN_PAGES) {
-    throw new Error(`corpus must have at least ${MIN_PAGES} pages (got ${pages.length})`);
-  }
-  if (queries.length < MIN_QUERIES) {
-    throw new Error(`queries must have at least ${MIN_QUERIES} entries (got ${queries.length})`);
-  }
-  if (stats.totalChunks < MIN_TOTAL_CHUNKS) {
-    throw new Error(`corpus must produce at least ${MIN_TOTAL_CHUNKS} chunks (got ${stats.totalChunks})`);
-  }
-  if (pages.length <= 10) {
-    throw new Error(`Recall@10 needs more than ten competing pages (got ${pages.length})`);
-  }
-  const goldPages = new Set(queries.flatMap(query => query.relevant_slugs));
-  if (goldPages.size < MIN_CONTEXTUAL_GOLD_PAGES) {
-    throw new Error(
-      `contextual retrieval needs at least ${MIN_CONTEXTUAL_GOLD_PAGES} unique gold pages (got ${goldPages.size})`,
-    );
-  }
-  const goldTypes = new Set(
-    pages.filter((page) => goldPages.has(page.slug)).map((page) => page.type),
-  );
-  for (const requiredType of ['person', 'company', 'meeting'] as const) {
-    if (!goldTypes.has(requiredType)) {
-      throw new Error(`queries must include a gold page of type ${requiredType}`);
-    }
-  }
-  const multichunkGoldPages = [...goldPages].filter(
-    (slug) => (stats.perPageChunks[slug] ?? 0) >= 2,
-  );
-  if (multichunkGoldPages.length < MIN_MULTICHUNK_GOLD_PAGES) {
-    throw new Error(
-      `contextual retrieval needs at least ${MIN_MULTICHUNK_GOLD_PAGES} multi-chunk gold pages ` +
-      `(got ${multichunkGoldPages.length})`,
-    );
-  }
+// ─── Per-mode cell ───────────────────────────────────────────────────
+
+export interface QueryScore {
+  query_id: string;
+  gold_slug: string;
+  recall_at_k: number;
+  reciprocal_rank: number;
+  top_slugs: string[];
+  error?: string;
 }
 
-function validateSynopsisModelRouting(benchrouter: boolean): void {
-  const model = resolveSynopsisModel(benchrouter);
-  if (!model.startsWith('anthropic:')) {
-    throw new Error(`synopsis model must use anthropic: transport (got ${model})`);
-  }
-  const modelId = model.slice('anthropic:'.length);
-  if (benchrouter && modelId !== ROUTE_ID) {
-    throw new Error(`benchrouter synopsis model must be anthropic:${ROUTE_ID} (got ${model})`);
-  }
+export interface ModeResult {
+  config: ResolvedCellConfig;
+  per_query: QueryScore[];
+  mean_recall_at_k: number;
+  mrr: number;
+  /** Same result lists scored against ROTATED gold labels (headroom control). */
+  mismatched_gold_mean_recall_at_k: number;
 }
 
-/**
- * gbrain records synopsis failures in bounded JSONL audit events. Read only
- * the latest matching events so a transport failure remains diagnosable while
- * the evaluator keeps contract validity separate from retrieval quality.
- */
-function readSynopsisAuditDetail(pageSlug: string): string {
-  const auditDir = process.env.GBRAIN_AUDIT_DIR?.trim() || join(homedir(), '.gbrain', 'audit');
-  let files: string[];
-  try {
-    files = readdirSync(auditDir)
-      .filter((name) => name.startsWith('synopsis-failures-') && name.endsWith('.jsonl'))
-      .sort()
-      .slice(-2);
-  } catch {
-    return '';
-  }
-  const events: string[] = [];
-  for (const file of files) {
-    let lines: string[];
-    try {
-      lines = readFileSync(join(auditDir, file), 'utf8').split('\n');
-    } catch {
-      continue;
-    }
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const event = JSON.parse(line) as {
-          page_slug?: unknown;
-          chunk_index?: unknown;
-          kind?: unknown;
-          detail?: unknown;
-        };
-        if (event.page_slug !== pageSlug) continue;
-        const kind = typeof event.kind === 'string' ? event.kind : 'unknown';
-        const chunk = Number.isInteger(event.chunk_index) ? `chunk=${event.chunk_index} ` : '';
-        const detail = typeof event.detail === 'string' ? event.detail.slice(0, 200) : '';
-        events.push(`${chunk}${kind}${detail ? `: ${detail}` : ''}`);
-      } catch {
-        // The audit file is best-effort diagnostic context.
-      }
-    }
-  }
-  return events.slice(-3).join(' | ');
+export interface RunModeOpts {
+  stubEmbed: boolean;
+  /** Probe accounting for (mode,query) cells; optional for tests. */
+  acc?: ProbeAccounting;
 }
 
-function synopsisFailureDetail(pageSlug: string, kind: string, detail?: string): string {
-  const audit = readSynopsisAuditDetail(pageSlug);
-  const direct = detail ? ` detail=${detail.slice(0, 200)}` : '';
-  const auditText = audit ? ` audit=${audit}` : '';
-  const transportEvidence = `${detail ?? ''} ${audit}`;
-  const label = kind === 'malformed' &&
-      /fetch|network|transport|socket|econn|timeout|connection|502|503|504/i.test(transportEvidence)
-    ? 'unknown_transport'
-    : kind;
-  const classification = label === kind ? '' : ` gbrain_classification=${kind}`;
-  return `gbrain_failure_class=${label}${classification}${direct}${auditText}`;
-}
+export async function runMode(mode: Mode, opts: RunModeOpts): Promise<ModeResult> {
+  ensureGateway(opts.stubEmbed);
+  const { pages, queries } = buildCorpus();
 
-async function validateFixedInputs(
-  pack: EvalPack,
-  pages: CorpusPage[],
-  pageRefs: string[],
-  queries: QuerySpec[],
-  benchrouter: boolean,
-): Promise<FixtureStats> {
-  for (const ref of pack.input_refs) readFileSync(ref, 'utf8');
-  for (const ref of pack.acceptance_refs) readFileSync(ref, 'utf8');
-  if (pack.case_refs) {
-    for (const ref of pack.case_refs) readFileSync(ref, 'utf8');
-  }
-  validateEvalPackContract(pack);
-  for (const ref of pageRefs) {
-    if (!pack.input_refs.includes(ref)) {
-      throw new Error(`eval-pack input_refs must include corpus page ${ref}`);
-    }
-  }
-  validateQueries(queries, pages);
-  const stats = await measureFixtureChunks(pages);
-  validateFixtureInvariants(pages, queries, stats);
-  validateSynopsisModelRouting(benchrouter);
-  return stats;
-}
-
-async function applyContextualReembed(
-  engine: PGLiteEngine,
-  pages: CorpusPage[],
-  mode: Mode,
-  synopsisModel: string,
-  benchrouter: boolean,
-): Promise<void> {
-  for (const page of pages) {
-    const result = await reembedPageWithContextualRetrieval({
-      engine,
-      pageSlug: page.slug,
-      sourceId: 'default',
-      globalMode: mode,
-      ...(mode === 'per_chunk_synopsis' ? { synopsisModel } : {}),
-    });
-    if (result.kind === 'transient_error' || result.kind === 'permanent_error') {
-      throw new Error(
-        `synopsis re-embed contract/transport failure for ${page.slug}: ` +
-        synopsisFailureDetail(page.slug, result.cause, result.detail),
-      );
-    }
-    if (result.kind === 'page_fallback') {
-      throw new Error(
-        `synopsis re-embed contract/transport fallback for ${page.slug}: ` +
-        `${result.mode_attempted} -> ${result.mode_applied} ` +
-        `(${synopsisFailureDetail(page.slug, result.fallback_kind)})`,
-      );
-    }
-    if (benchrouter && result.kind !== 'success') {
-      throw new Error(`unexpected synopsis result for ${page.slug}: ${result.kind}`);
-    }
-  }
-}
-
-function mean(values: number[]): number {
-  return values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
-}
-
-function reciprocalRank(docs: RankedDoc[], relevant: Set<string>): number {
-  const rank = docs.findIndex((doc) => relevant.has(doc.page_id));
-  return rank < 0 ? 0 : 1 / (rank + 1);
-}
-
-async function runMode(
-  mode: Mode,
-  pages: CorpusPage[],
-  queries: QuerySpec[],
-  benchrouter: boolean,
-): Promise<ModeResult> {
-  configureEmbeddingGateway();
-  if (benchrouter) {
-    installBenchRouterSynopsisRouting();
-  }
-
-  const engine = new PGLiteEngine() as PGLiteEngine;
+  const engine = new PGLiteEngine();
   const origLog = console.log;
+  const origErr = console.error;
+  console.log = () => {};
+  console.error = () => {};
   try {
     await engine.connect({});
     await engine.initSchema();
-    console.log = () => {};
 
-    await engine.setConfig('contextual_retrieval', mode);
-    await importFixturePages(engine, pages, { noEmbed: mode !== 'none' });
-    if (mode !== 'none') {
-      await applyContextualReembed(
-        engine,
-        pages,
-        mode,
-        resolveSynopsisModel(benchrouter),
-        benchrouter,
+    // WS5: pin BEFORE ingest — the wrap is applied at embed time.
+    for (const [key, value] of Object.entries(BASE_SEARCH_CONFIG)) {
+      await engine.setConfig(key, value);
+    }
+    await engine.setConfig('search.contextual_retrieval', mode);
+
+    // Conformance: gbrain must actually resolve the requested mode.
+    const config = await resolveEffectiveConfig(engine, mode);
+    if (config.contextual_retrieval !== mode) {
+      throw new ConfigConformanceError(
+        `requested contextual_retrieval=${mode} but gbrain resolved '${config.contextual_retrieval}' (resolved_mode=${config.resolved_mode}) — config key not wired`,
+      );
+    }
+    if (config.reranker_enabled || config.expansion) {
+      throw new ConfigConformanceError(
+        `reranker_enabled=${config.reranker_enabled} expansion=${config.expansion} — WS5 pins not applied`,
       );
     }
 
-    const perQ1: number[] = [];
-    const perQ5: number[] = [];
-    const perQ10: number[] = [];
-    const perQmrr: number[] = [];
-    for (const q of queries) {
-      const results = await hybridSearch(engine, q.query, { limit: 30 } as any);
-      const docs = toRankedDocs(results as Array<{ slug: string; score?: number }>).slice(0, 10);
-      const rel = new Set(q.relevant_slugs);
-      perQ1.push(recallAtK(docs, rel, 1));
-      perQ5.push(recallAtK(docs, rel, 5));
-      perQ10.push(recallAtK(docs, rel, 10));
-      perQmrr.push(reciprocalRank(docs, rel));
+    for (const p of pages) {
+      await importFromContent(engine, p.slug, p.body, { noEmbed: false });
     }
+
+    await assertCorpusPremises(engine);
+
+    const perQuery: QueryScore[] = [];
+    for (const q of queries) {
+      const cellId = `${mode}:${q.id}`;
+      try {
+        const results = await hybridSearch(engine, q.query, { limit: 30 });
+        // Chunk → page normalization (metrics.ts contract): first occurrence
+        // per slug, order preserved.
+        const slugs = uniqueInOrder(results.map((r: { slug: string }) => r.slug));
+        const gold = new Set([q.gold_slug]);
+        const score: QueryScore = {
+          query_id: q.id,
+          gold_slug: q.gold_slug,
+          recall_at_k: recallAtK(slugs, gold, K),
+          reciprocal_rank: reciprocalRank(slugs, gold),
+          top_slugs: slugs.slice(0, K),
+        };
+        perQuery.push(score);
+        opts.acc?.score(cellId, score.recall_at_k);
+      } catch (e) {
+        // The retrieval pipeline failing a query is the SUT misbehaving:
+        // scored 0, kept in the denominator (probe-accounting policy).
+        const msg = e instanceof Error ? e.message : String(e);
+        perQuery.push({ query_id: q.id, gold_slug: q.gold_slug, recall_at_k: 0, reciprocal_rank: 0, top_slugs: [], error: msg });
+        opts.acc?.error(cellId, 'sut', `hybridSearch failed: ${msg}`);
+      }
+    }
+
+    const mean = (f: (s: QueryScore) => number): number =>
+      perQuery.length === 0 ? NaN : perQuery.reduce((a, s) => a + f(s), 0) / perQuery.length;
+
+    // Headroom control: score the SAME ranked lists against rotated gold
+    // labels. On a saturated corpus (every page always in top-K) this equals
+    // the real mean and the headroom gate fails — exactly the old bug.
+    const n = queries.length;
+    const mismatched = perQuery.map((s, i) => {
+      const wrongGold = new Set([queries[(i + 1) % n]!.gold_slug]);
+      return recallAtK(s.top_slugs, wrongGold, K);
+    });
+    const mismatchedMean = mismatched.length === 0 ? NaN : mismatched.reduce((a, b) => a + b, 0) / mismatched.length;
 
     return {
-      mode,
-      per_query_recall_at_1: perQ1,
-      per_query_recall_at_5: perQ5,
-      per_query_recall_at_10: perQ10,
-      per_query_mrr: perQmrr,
-      mean_recall_at_1: mean(perQ1),
-      mean_recall_at_5: mean(perQ5),
-      mean_recall_at_10: mean(perQ10),
-      mean_mrr: mean(perQmrr),
+      config,
+      per_query: perQuery,
+      mean_recall_at_k: mean(s => s.recall_at_k),
+      mrr: mean(s => s.reciprocal_rank),
+      mismatched_gold_mean_recall_at_k: mismatchedMean,
     };
   } finally {
     console.log = origLog;
-    await engine.disconnect();
+    console.error = origErr;
+    await engine.disconnect().catch(() => {});
   }
 }
 
-function writeBenchRouterResult(
-  resultPath: string,
-  baseline: ModeResult,
-  synopsis: ModeResult,
-): void {
-  const mrrLift = synopsis.mean_mrr - baseline.mean_mrr;
-  mkdirSync(join(process.cwd(), '.benchrouter'), { recursive: true });
-  const payload: BenchRouterExecutableResult = {
-    schema_version: 'benchrouter.executable_result.v1',
-    primary_metric: {
-      name: PRIMARY_METRIC,
-      score: synopsis.mean_mrr,
-    },
-    metrics: {
-      candidate_mrr: synopsis.mean_mrr,
-      baseline_mrr: baseline.mean_mrr,
-      candidate_recall_at_1: synopsis.mean_recall_at_1,
-      candidate_recall_at_5: synopsis.mean_recall_at_5,
-      candidate_recall_at_10: synopsis.mean_recall_at_10,
-      baseline_recall_at_1: baseline.mean_recall_at_1,
-      baseline_recall_at_5: baseline.mean_recall_at_5,
-      baseline_recall_at_10: baseline.mean_recall_at_10,
-    },
-  };
-  writeFileSync(resultPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
-  process.stderr.write(`[cat26] benchrouter result: ${resultPath}\n`);
-  process.stderr.write(`[cat26]   candidate_mrr=${(synopsis.mean_mrr * 100).toFixed(1)}%\n`);
-  process.stderr.write(`[cat26]   baseline_mrr=${(baseline.mean_mrr * 100).toFixed(1)}%\n`);
-  process.stderr.write(`[cat26]   signed_mrr_lift=${(mrrLift * 100).toFixed(1)} points\n`);
-  process.stderr.write(`[cat26]   candidate_recall_at_5=${(synopsis.mean_recall_at_5 * 100).toFixed(1)}%\n`);
-  process.stderr.write(`[cat26]   candidate_recall_at_10=${(synopsis.mean_recall_at_10 * 100).toFixed(1)}%\n`);
+// ─── Best-mode selection (strict tie-break, finding -02) ─────────────
+
+export function chooseBestMode(results: ModeResult[]): { best_mode: Mode | 'tie'; tied: Mode[] } {
+  if (results.length === 0) return { best_mode: 'tie', tied: [] };
+  const max = Math.max(...results.map(r => r.mean_recall_at_k));
+  const tied = results.filter(r => r.mean_recall_at_k === max).map(r => r.config.mode_requested);
+  return { best_mode: tied.length === 1 ? tied[0]! : 'tie', tied };
 }
+
+/** Stub-mode gate: the title cell must observably differ from the none cell.
+ *  All-identical cells are the exact failure mode of finding cats26-29-01
+ *  (knob set under a key gbrain never reads). */
+export function cellsDifferGate(noneR: ModeResult, titleR: ModeResult): { pass: boolean; reason?: string } {
+  const differs = noneR.per_query.some((s, i) => s.recall_at_k !== titleR.per_query[i]!.recall_at_k
+    || s.reciprocal_rank !== titleR.per_query[i]!.reciprocal_rank);
+  return differs
+    ? { pass: true }
+    : { pass: false, reason: 'title cell is per-query identical to the none cell — the contextual_retrieval knob had no observable effect on retrieval (audit finding cats26-29-01 regression)' };
+}
+
+/** Stub-mode gate: synopsis-requested must equal title (gbrain's documented
+ *  inline fallback). Divergence means the eval's labeling is stale. */
+export function synopsisFallbackGate(titleR: ModeResult, synR: ModeResult): { pass: boolean; reason?: string } {
+  const same = synR.per_query.every((s, i) => s.recall_at_k === titleR.per_query[i]!.recall_at_k
+    && s.reciprocal_rank === titleR.per_query[i]!.reciprocal_rank);
+  return same
+    ? { pass: true }
+    : { pass: false, reason: "per_chunk_synopsis cell diverged from title cell under deterministic embeds — gbrain's documented inline title-fallback no longer holds; update the eval to exercise the real synopsis path" };
+}
+
+/** Headroom gate over the best-scoring cell. Fails on a saturated corpus. */
+export function headroomGate(results: ModeResult[]): { pass: boolean; reason?: string } {
+  if (results.length === 0) return { pass: false, reason: 'no mode results' };
+  const best = results.reduce((a, b) => (b.mean_recall_at_k > a.mean_recall_at_k ? b : a));
+  if (!(best.mean_recall_at_k > 0)) {
+    return { pass: false, reason: `best cell (${best.config.mode_requested}) mean R@${K} is 0 — retrieval found nothing, the A/B cannot discriminate` };
+  }
+  if (best.mismatched_gold_mean_recall_at_k > 0.5 * best.mean_recall_at_k) {
+    return {
+      pass: false,
+      reason: `headroom control: mismatched-gold R@${K} ${best.mismatched_gold_mean_recall_at_k.toFixed(2)} > 0.5 × real ${best.mean_recall_at_k.toFixed(2)} on the '${best.config.mode_requested}' cell — the metric is saturated (every page ranks top-K regardless of relevance)`,
+    };
+  }
+  return { pass: true };
+}
+
+// ─── Paths + receipt ─────────────────────────────────────────────────
+
+const RUNNER_DIR = dirname(fileURLToPath(import.meta.url));
+const REPORTS_ROOT = join(RUNNER_DIR, '..', 'reports');
+const DUMPS_DIR = join(REPORTS_ROOT, CATEGORY);
+
+function baseReceipt(startedAt: string): Omit<Receipt, 'run_status' | 'n_total' | 'n_scored' | 'completion_rate' | 'errors' | 'publishable'> {
+  return {
+    schema_version: RECEIPT_SCHEMA_VERSION,
+    benchmark_version: BENCHMARK_VERSION,
+    category: CATEGORY,
+    gbrain_version: gbrainVersion(),
+    gbrain_pin: gbrainPin(),
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+  };
+}
+
+function resolvedConfig(stubEmbed: boolean, cellConfigs: ResolvedCellConfig[]): Record<string, unknown> {
+  return {
+    ...BASE_SEARCH_CONFIG,
+    k: K,
+    corpus_pages: buildCorpus().pages.length,
+    queries: buildCorpus().queries.length,
+    embedding_transport: stubEmbed
+      ? 'stubbed deterministic hash-embed (__setEmbedTransportForTests)'
+      : 'live openai:text-embedding-3-large',
+    per_cell: cellConfigs,
+    note: "per_chunk_synopsis is title-tier on the inline import path (gbrain import-file.ts); the cell measures config plumbing, not synopsis generation",
+  };
+}
+
+// ─── Main ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
-  if (args.help) {
-    printHelp();
-    return;
+  const startedAt = new Date().toISOString();
+  const argv = process.argv.slice(2);
+  const stubEmbed = argv.includes('--stub-embed') || process.env.CAT26_STUB_EMBED === '1';
+  const allowSkip = argv.includes('--allow-skip');
+
+  if (!stubEmbed && !process.env.OPENAI_API_KEY) {
+    const reason = 'OPENAI_API_KEY required for live embeds (run with --stub-embed for the hermetic conformance run)';
+    console.error(`[cat26] SKIP: ${reason}`);
+    writeReceipt(receiptPath(CATEGORY, REPORTS_ROOT), {
+      ...baseReceipt(startedAt),
+      run_status: 'skipped',
+      skip_reason: reason,
+      n_total: MODES.length * buildCorpus().queries.length,
+      n_scored: 0,
+      completion_rate: 0,
+      errors: [],
+      publishable: false,
+      resolved_config: resolvedConfig(stubEmbed, []),
+    });
+    process.exit(allowSkip ? 0 : 3);
   }
 
-  const corpus = loadCorpus();
-  const pages = corpus.pages;
-  const queries = loadQueries();
-  const pack = loadEvalPack();
-  validateModeList(args.modes);
+  const { pages, queries } = buildCorpus();
+  console.log(`[cat26] ${pages.length} pages (${GOLD_SPECS.length} gold + ${pages.length - GOLD_SPECS.length} distractors) × ${queries.length} queries × ${MODES.length} modes, K=${K}, embeds=${stubEmbed ? 'stubbed-hash' : 'live-openai'}`);
 
-  if (args.validate) {
-    const stats = await validateFixedInputs(pack, pages, corpus.pageRefs, queries, args.benchrouter);
-    process.stderr.write('[cat26] validate ok\n');
-    process.stderr.write(`[cat26]   corpus pages: ${pages.length}\n`);
-    process.stderr.write(`[cat26]   queries: ${queries.length}\n`);
-    process.stderr.write(`[cat26]   total chunks: ${stats.totalChunks}\n`);
-    process.stderr.write(`[cat26]   modes: ${args.modes.join(',')}\n`);
-    process.stderr.write(`[cat26]   expected synopsis calls: ${stats.totalChunks}\n`);
-    process.stderr.write(`[cat26]   eval-pack max_model_calls: ${pack.max_model_calls}\n`);
-    process.stderr.write(`[cat26]   synopsis model: ${resolveSynopsisModel(args.benchrouter)}\n`);
-    process.stderr.write(`[cat26]   eval-pack: ${EVAL_PACK_PATH}\n`);
-    process.stderr.write(`[cat26]   primary_metric: ${pack.primary_metric}\n`);
-    if (stats.totalChunks > pack.max_model_calls) {
-      throw new Error(
-        `fixture needs ${stats.totalChunks} synopsis calls but eval-pack max_model_calls is ${pack.max_model_calls}`,
-      );
-    }
-    return;
-  }
-
-  const fixtureStats = await measureFixtureChunks(pages);
-  validateQueries(queries, pages);
-  validateFixtureInvariants(pages, queries, fixtureStats);
-  if (fixtureStats.totalChunks > pack.max_model_calls) {
-    throw new Error(
-      `fixture needs ${fixtureStats.totalChunks} synopsis calls but eval-pack max_model_calls is ${pack.max_model_calls}`,
-    );
-  }
-
-  const modes = args.benchrouter
-    ? (['title', 'per_chunk_synopsis'] as Mode[])
-    : args.modes;
-  process.stderr.write(
-    `[cat26] testing ${pages.length} pages × ${queries.length} queries × ${modes.length} mode(s)...\n`,
-  );
-
+  const acc = new ProbeAccounting(MODES.length * queries.length);
   const results: ModeResult[] = [];
-  for (const mode of modes) {
-    process.stderr.write(`[cat26]   mode=${mode}...\n`);
-    const r = await runMode(mode, pages, queries, args.benchrouter && mode === 'per_chunk_synopsis');
-    results.push(r);
-    process.stderr.write(
-      `[cat26]   mode=${mode} mean MRR=${(r.mean_mrr * 100).toFixed(1)}% ` +
-      `R@1=${(r.mean_recall_at_1 * 100).toFixed(1)}% ` +
-      `R@5=${(r.mean_recall_at_5 * 100).toFixed(1)}% ` +
-      `R@10=${(r.mean_recall_at_10 * 100).toFixed(1)}%\n`,
-    );
+  for (const mode of MODES) {
+    process.stderr.write(`  mode=${mode}... `);
+    try {
+      const r = await runMode(mode, { stubEmbed, acc });
+      results.push(r);
+      process.stderr.write(`R@${K}=${(r.mean_recall_at_k * 100).toFixed(1)}% MRR=${r.mrr.toFixed(3)} (resolved cr=${r.config.contextual_retrieval}, effective inline=${r.config.mode_effective_inline})\n`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const origin = e instanceof ConfigConformanceError || e instanceof CorpusPremiseError ? 'harness' : 'harness';
+      console.error(`\n[cat26] CELL ABORT (${mode}): ${msg}`);
+      for (const q of queries) acc.error(`${mode}:${q.id}`, origin, msg);
+      const s = acc.summary();
+      writeReceipt(receiptPath(CATEGORY, REPORTS_ROOT), {
+        ...baseReceipt(startedAt),
+        run_status: 'error',
+        n_total: s.n_total,
+        n_scored: s.n_scored,
+        completion_rate: s.completion_rate,
+        errors: s.errors,
+        publishable: false,
+        resolved_config: resolvedConfig(stubEmbed, results.map(r => r.config)),
+      });
+      process.exit(2);
+    }
   }
 
-  if (args.benchrouter) {
-    const baseline = results.find(r => r.mode === 'title');
-    const synopsis = results.find(r => r.mode === 'per_chunk_synopsis');
-    if (!baseline) throw new Error('benchrouter mode requires title baseline result');
-    if (!synopsis) throw new Error('benchrouter mode requires per_chunk_synopsis result');
-    const resultPath = args.resultPath ?? pack.result_path;
-    writeBenchRouterResult(resultPath, baseline, synopsis);
-    return;
+  const noneR = results.find(r => r.config.mode_requested === 'none')!;
+  const titleR = results.find(r => r.config.mode_requested === 'title')!;
+  const synR = results.find(r => r.config.mode_requested === 'per_chunk_synopsis')!;
+
+  const gateReasons: string[] = [];
+  const headroom = headroomGate(results);
+  if (!headroom.pass) gateReasons.push(headroom.reason!);
+
+  // Stub-mode determinism gates (see the exported gate helpers).
+  if (stubEmbed) {
+    const fallback = synopsisFallbackGate(titleR, synR);
+    if (!fallback.pass) gateReasons.push(fallback.reason!);
+    const differ = cellsDifferGate(noneR, titleR);
+    if (!differ.pass) gateReasons.push(differ.reason!);
   }
 
-  let gbrainVersion = 'unknown';
-  try {
-    const pkg = await import('gbrain/package.json' as any);
-    gbrainVersion = (pkg as any).default?.version ?? (pkg as any).version ?? 'unknown';
-  } catch { /* best-effort */ }
+  const { best_mode, tied } = chooseBestMode(results);
+  const accSummary = acc.summary();
 
-  const bestMode = results.reduce((a, b) =>
-    a.mean_mrr >= b.mean_mrr ? a : b,
-  ).mode;
-  const noneR = results.find(r => r.mode === 'none');
-  const titleR = results.find(r => r.mode === 'title');
-  const synR = results.find(r => r.mode === 'per_chunk_synopsis');
-
-  const receipt: Receipt = {
-    schema_version: 1,
-    cat: 'cat26-contextual-retrieval',
-    gbrain_version: gbrainVersion,
-    timestamp: new Date().toISOString(),
+  const summary = {
+    mode: stubEmbed ? 'stub-embed' : 'live-embed',
+    k: K,
     corpus_pages: pages.length,
     queries: queries.length,
-    modes: results,
-    best_mode: bestMode,
-    title_vs_none_delta_mrr: (titleR?.mean_mrr ?? 0) - (noneR?.mean_mrr ?? 0),
-    synopsis_vs_title_delta_mrr: (synR?.mean_mrr ?? 0) - (titleR?.mean_mrr ?? 0),
-    none_vs_title_delta_at_5: (titleR?.mean_recall_at_5 ?? 0) - (noneR?.mean_recall_at_5 ?? 0),
-    none_vs_synopsis_delta_at_5: (synR?.mean_recall_at_5 ?? 0) - (noneR?.mean_recall_at_5 ?? 0),
-    none_vs_title_delta_at_10: (titleR?.mean_recall_at_10 ?? 0) - (noneR?.mean_recall_at_10 ?? 0),
-    none_vs_synopsis_delta_at_10: (synR?.mean_recall_at_10 ?? 0) - (noneR?.mean_recall_at_10 ?? 0),
+    per_mode: results.map(r => ({
+      mode_requested: r.config.mode_requested,
+      mode_effective_inline: r.config.mode_effective_inline,
+      resolved_contextual_retrieval: r.config.contextual_retrieval,
+      mean_recall_at_k: r.mean_recall_at_k,
+      mrr: r.mrr,
+      mismatched_gold_mean_recall_at_k: r.mismatched_gold_mean_recall_at_k,
+    })),
+    best_mode,
+    tied_modes: tied,
+    title_vs_none_delta: titleR.mean_recall_at_k - noneR.mean_recall_at_k,
+    // Named for what it is: synopsis was REQUESTED; inline effect is title.
+    synopsis_requested_vs_none_delta: synR.mean_recall_at_k - noneR.mean_recall_at_k,
+    synopsis_not_exercised_inline_import: true,
+    gate: gateReasons.length === 0 ? 'pass' : 'fail',
+    gate_reasons: gateReasons,
   };
 
-  const outDir = join(process.cwd(), 'eval/reports/cat26-contextual-retrieval');
-  mkdirSync(outDir, { recursive: true });
-  const outFile = join(outDir, `${new Date().toISOString().slice(0, 10)}-cat26.json`);
-  writeFileSync(outFile, JSON.stringify(receipt, null, 2) + '\n', 'utf8');
+  if (!existsSync(DUMPS_DIR)) mkdirSync(DUMPS_DIR, { recursive: true });
+  writeFileSync(
+    join(DUMPS_DIR, `${new Date().toISOString().slice(0, 10)}-cat26.json`),
+    JSON.stringify({ summary, per_mode: results, accounting: accSummary }, null, 2) + '\n',
+  );
 
-  process.stderr.write('\n[cat26] ─── Scorecard ───────────────────\n');
-  for (const r of results) {
-    process.stderr.write(
-      `[cat26]   mode=${r.mode.padEnd(22)} ` +
-      `MRR=${(r.mean_mrr * 100).toFixed(1)}% ` +
-      `R@1=${(r.mean_recall_at_1 * 100).toFixed(1)}% ` +
-      `R@5=${(r.mean_recall_at_5 * 100).toFixed(1)}% ` +
-      `R@10=${(r.mean_recall_at_10 * 100).toFixed(1)}%\n`,
-    );
+  if (accSummary.run_invalid) {
+    writeReceipt(receiptPath(CATEGORY, REPORTS_ROOT), {
+      ...baseReceipt(startedAt),
+      run_status: 'error',
+      n_total: accSummary.n_total,
+      n_scored: accSummary.n_scored,
+      completion_rate: accSummary.completion_rate,
+      errors: accSummary.errors,
+      publishable: false,
+      resolved_config: resolvedConfig(stubEmbed, results.map(r => r.config)),
+      data: { summary: summary as unknown as Record<string, unknown> },
+    });
+    console.error(`[cat26] RUN INVALID: infra error rate ${(accSummary.infra_error_rate * 100).toFixed(0)}% over cap`);
+    process.exit(2);
   }
-  process.stderr.write(`[cat26]   best mode:           ${bestMode}\n`);
-  process.stderr.write(`[cat26]   receipt:             ${outFile}\n`);
+
+  // Stub-embed runs verify plumbing + corpus headroom with a synthetic
+  // embedder; they can never claim a full 'pass' (or publishable).
+  const verdict: ReceiptVerdict = summary.gate === 'fail' ? 'fail' : stubEmbed ? 'partial' : 'pass';
+  writeReceipt(receiptPath(CATEGORY, REPORTS_ROOT), {
+    ...baseReceipt(startedAt),
+    run_status: 'completed',
+    verdict,
+    n_total: accSummary.n_total,
+    n_scored: accSummary.n_scored,
+    completion_rate: accSummary.completion_rate,
+    errors: accSummary.errors,
+    publishable: accSummary.publishable && !stubEmbed,
+    resolved_config: resolvedConfig(stubEmbed, results.map(r => r.config)),
+    data: { summary: summary as unknown as Record<string, unknown> },
+  });
+
+  console.log('');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`cat26 contextual retrieval A/B — summary (${summary.mode})`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  for (const m of summary.per_mode) {
+    console.log(`  ${String(m.mode_requested).padEnd(22)} R@${K}=${(m.mean_recall_at_k * 100).toFixed(1).padStart(5)}%  MRR=${m.mrr.toFixed(3)}  (effective inline: ${m.mode_effective_inline}, control=${(m.mismatched_gold_mean_recall_at_k * 100).toFixed(1)}%)`);
+  }
+  console.log(`best mode:                    ${best_mode}${best_mode === 'tie' ? ` (${tied.join(' = ')})` : ''}`);
+  console.log(`title vs none:                ${(summary.title_vs_none_delta * 100).toFixed(1)}pt`);
+  console.log(`synopsis-requested vs none:   ${(summary.synopsis_requested_vs_none_delta * 100).toFixed(1)}pt (inline path = title tier; synopsis NOT exercised)`);
+  if (accSummary.errors.length > 0) {
+    console.log(`errors: ${accSummary.errors.map(e => `${e.probe_id}:${e.origin}`).join(', ')}`);
+  }
+  console.log('');
+  console.log(`gate: ${summary.gate.toUpperCase()}${verdict === 'partial' && summary.gate === 'pass' ? ' (verdict partial: stub-embed run)' : ''}`);
+  if (summary.gate === 'fail') {
+    for (const reason of gateReasons) console.log(`  ✗ ${reason}`);
+    process.exit(1);
+  }
+  console.log('  ✓ all gates pass');
 }
 
-await main();
+if (import.meta.main) {
+  main().catch(err => {
+    console.error('[cat26] fatal:', err);
+    process.exit(2);
+  });
+}
