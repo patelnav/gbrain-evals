@@ -14,14 +14,20 @@ bin/
 # Opus cache (regenerate via eval:generate-amara-life; 398 items ~1.6MB)
 eval/data/amara-life-v1/_cache/
 
+# Opus cache (regenerate via eval:generate-transcript-distill; 24 transcripts)
+eval/data/transcript-distill-v1/_cache/
+
 # Benchmark run reports (transient — commit baselines to docs/benchmarks/ instead)
 eval/reports/
 
-# Multi-modal fixtures (hash-verified download via eval:fetch-multimodal; not committed)
-eval/data/multimodal/*/
-!eval/data/multimodal/*/fixtures.json
-!eval/data/multimodal/*/README.md
+# NOTE: eval/data/multimodal/ fixtures are COMMITTED (hermetic, sha256-pinned
+# in each fixtures.json — audit retrieval-cats-03). A legacy ignore rule here
+# referenced a fetch script that never existed and silently kept the fixtures
+# out of git, so CI's fresh clone had none while local runs passed.
 
 # System files
 .DS_Store
 *.log
+!docs/benchmarks/2026-09-09-retrieval-refresh/**/run.log
+__pycache__/
+.budget.lock

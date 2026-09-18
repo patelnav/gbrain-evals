@@ -1,10 +1,22 @@
-# BrainBench memory conformance — first published run (Cat 34)
+# BrainBench Cat 34: remembering something without being asked
 
-**The verdict in one line: gbrain's production push path volunteers the right
-memory 81% of the time it should, never injects junk (precision 1.0), never
-leaks across sources, and loses zero facts through the write path — while the
-two contract seams quantify exactly what tighter injection budgets cost
-(recall 0.66 at 2 pointers, 0.45 at 1 fragment).**
+Published under the June 12, 2026 corpus-freeze date. The first run finished June 13 at 17:44 UTC on gbrain 0.44.0.0. A September 1 rerun tested gbrain 0.47.8.0 on a larger corpus.
+
+A memory system can have excellent search and still be unhelpful. The agent may never think to search. This test asks whether gbrain puts a useful memory into the agent's context at the right moment, stays quiet when it should, saves supplied facts correctly, and carries them into another session.
+
+The June run found a specific defect: lowercase names and surname-only mentions caused nine missed retrieval triggers. The same misses appeared through all three integration shapes because they shared the same entity resolver. That gave us a concrete fix to make. Gbrain v0.46.15.0 fixed those cases; the September rerun recorded zero missed triggers and zero false triggers on its expanded corpus.
+
+## What is being measured
+
+BrainBench's memory suite lives in the gbrain repository. This repository calls it through a subprocess and a JSON contract. It tests gbrain's memory layer under three ways an agent can receive context; it does not rank three competing agents' intelligence.
+
+A “pointer” is a short reference to a stored page. If a user mentions three people and the integration allows only one pointer, even a resolver that recognizes every name may leave useful pages out. “Push recall” measures how much expected memory was supplied. “Push precision” asks how much supplied memory was appropriate.
+
+“Know to ask” measures whether a turn triggers retrieval when it should. A false fire is the opposite mistake: adding memory to a turn that should stay quiet. Write-back tests saving supplied facts with provenance. Continuity tests whether another session can retrieve what a previous session saved. Isolation checks whether a source receives another source's content.
+
+## The first run
+
+These tables and charts preserve the original June measurements.
 
 | harness (seam) | know-to-ask failure ↓ | false fire ↓ | push recall ↑ | push precision ↑ | write-back fidelity ↑ | continuity ↑ | isolation violations |
 |---|---|---|---|---|---|---|---|
@@ -12,69 +24,13 @@ two contract seams quantify exactly what tighter injection budgets cost
 | claude-code (contract) | 0.150 | 0.023 | 0.660 | 1.000 | 1.000 | 1.000 | 0 |
 | codex (contract) | 0.150 | 0.000 | 0.447 | 1.000 | 1.000 | 1.000 | 0 |
 
-![Push recall by harness seam](./2026-06-12-brainbench-memory/push-recall.svg)
+![June push recall by integration](2026-06-12-brainbench-memory/push-recall.svg)
 
-What changed: agent memory now has a per-harness scorecard. Before this run, a
-salience or reflex change shipped on vibes; now every gbrain PR must hold or
-move these numbers against a committed baseline that CI compares against
-main's copy — a PR cannot rewrite the thing it's graded by.
+The chart shows the first run's 0.809 / 0.660 / 0.447 recall. It has not been redrawn with September values.
 
-## What is gbrain
+All three rows use `extractCandidates` followed by `resolveEntitiesToPointers`. The OpenClaw row exercised the production context-engine path: up to three pointers and suppression of material already in the conversation. The Claude Code row modeled the hook contract with two pointers and only the current prompt. The Codex row modeled a static entity index plus one per-turn fragment. Index slugs did not count as retrieved memories.
 
-gbrain is a personal-knowledge brain: markdown files as the source of truth,
-indexed into embedded Postgres (PGLite) or managed Postgres + pgvector, with
-hybrid retrieval (keyword + vector + RRF fusion, source-aware boosts, optional
-expansion). Agents reach it over MCP from any harness. The piece under test
-here is the memory layer above retrieval: the Retrieval Reflex (deterministic
-push of page pointers into context), the conversation→facts write-back
-pipeline, and cross-session/cross-harness continuity.
-Repo: github.com/garrytan/gbrain.
-
-## What is the benchmark
-
-BrainBench is gbrain's own cross-harness memory conformance suite, shipped in
-the gbrain repo (`evals/brainbench/`, methodology `docs/eval/BRAINBENCH.md`)
-and driven here through its published foreign-runner contract — this runner
-imports zero gbrain internals. Dataset: 141 conversation fixtures / 241
-gold-annotated turns across 7 stratified categories (know-to-ask positive +
-negative, push-under-budget, write-back, continuity pairs, multi-source,
-adversarial), generated deterministically (Mulberry32, seed 42) over a
-whole-cloth fictional universe; gold is sealed in separate files and adapters
-only ever see sanitized turns. ~15% of fixtures are holdout, excluded from the
-gate run reported here. Metrics: failure/false-fire rates, micro-averaged push
-precision/recall, write-back fidelity + provenance accuracy, continuity rate,
-source-isolation violation count. Why this benchmark: it operationalizes the
-four failure modes every agent-memory thesis names — nobody has a push path,
-intrusion budgets are unenforced, write is less solved than read, and
-continuity dies at the harness hop.
-
-## Adapters tested
-
-All three drive ONE shared pipeline (`extractCandidates` →
-`resolveEntitiesToPointers`) with declarative seam configs, so the deltas
-between rows are seam constraints, not implementation drift.
-
-**openclaw — seam: production.** The shipped OpenClaw context-engine path
-(`src/core/context-engine.ts` → reflex), byte-for-byte: 3-pointer budget,
-prior-context suppression, markdown pointer block. This row is what an
-OpenClaw user's memory actually does. Result: 0.150 know-to-ask failure /
-0.809 push recall / zero false fires.
-
-**claude-code — seam: contract.** The UserPromptSubmit hook wire contract
-(`{prompt, session_id, cwd}` → `additionalContext`), 2-pointer budget, and —
-the defining constraint — no conversation memory: a hook sees only the current
-prompt. Result: identical resolution quality, but 0.023 false-fire rate (it
-re-injects what suppression would have held back) and recall capped at 0.660.
-
-**codex — seam: contract.** The fragments model: a static entity-index
-preamble computed once (its slugs deliberately don't count as injections —
-counting an index would game recall) plus at most one per-turn fragment.
-Result: recall 0.447 — a 1-fragment budget simply cannot cover 3-entity turns
-— with the preamble's token cost visible in the intrusion diagnostics.
-
-## Results
-
-Head-to-head, gate corpus (118 non-holdout fixtures; counts are gold items):
+These constraints explain why the rows differ, but this is not a pure budget-only experiment: suppression and the available conversation state also change. In June, the Claude Code and Codex rows were contract simulations, not measurements of live third-party applications.
 
 | System | k/budget | n (gold turns) | LLM in loop? | know-to-ask fail | push R / P | write-back | continuity | Source |
 |---|---|---|---|---|---|---|---|---|
@@ -82,16 +38,11 @@ Head-to-head, gate corpus (118 non-holdout fixtures; counts are gold items):
 | gbrain via claude-code hook contract | 2 pointers | 146 / 94 | no | 0.150 | 0.660 / 1.000 | 1.000 | 1.000 | this run |
 | gbrain via codex fragments contract | 1 fragment | 146 / 94 | no | 0.150 | 0.447 / 1.000 | 1.000 | 1.000 | this run |
 
-No published external system reports these four memory-conformance metrics
-today — that absence is the point of shipping the yardstick. The retrieval
-layer underneath has its own head-to-heads (see the LongMemEval and
-PrecisionMemBench scorecards in this directory); BrainBench rows become
-comparable to other memory systems when someone implements an adapter against
-the published fixture/result JSON Schemas (`evals/brainbench/schema/`).
+## Where it failed
 
-## Per-suite breakdown
+![June suite results](2026-06-12-brainbench-memory/suite-matrix.svg)
 
-![Suite matrix](./2026-06-12-brainbench-memory/suite-matrix.svg)
+This chart also preserves the June run. The detailed counts were:
 
 | harness | kta failed/gold | push failed/gold | write-back failed/gold | continuity failed/gold |
 |---|---|---|---|---|
@@ -99,20 +50,13 @@ the published fixture/result JSON Schemas (`evals/brainbench/schema/`).
 | claude-code | 11/146 | 32/94 | 0/58 | 0/12 |
 | codex | 9/146 | 52/94 | 0/58 | 0/12 |
 
-Three patterns worth pulling out. First, the know-to-ask failure rate is
-0.150 on every seam — those 9 misses are the same 9 gold turns, the corpus's
-deliberately-hard lowercase and surname-only mentions that the v1 reflex's
-capitalization-biased extractor cannot see (documented limits in
-`entity-salience.ts`). That number is the measured roadmap for the next reflex
-iteration, not noise. Second, claude-code's two extra know-to-ask failures are
-false fires, not misses: with no conversation memory, the hook contract
-re-injects pointers production suppression would hold — the bench prices the
-missing state, 0.023 per silent turn. Third, push recall is a clean budget
-gradient (0.809 → 0.660 → 0.447) at constant precision 1.000: with exact-match
-resolution, everything injected is right, and the only question is how much
-the seam lets through.
+The know-to-ask denominator needs care. The 146 turns contain 60 that should retrieve and 86 that should stay silent. Nine missed positive turns give a failure rate of 9/60 = 0.150. The Claude Code contract also fired on two silent turns: 2/86 = 0.023. Its combined failure count is therefore 11/146. Dividing nine by 146 would answer a different question.
 
-## Intrusion cost (reported, not gated)
+The shared nine misses involved deliberately difficult lowercase or surname-only references. The two extra Claude Code failures were repeated injections that conversation-aware suppression would have prevented. These are actionable findings: improve name resolution and carry enough context to avoid reminding the agent of something it already has.
+
+The original push results also make a product tradeoff visible. A smaller context allowance can reduce clutter, but it can omit useful memories. A budget should be chosen with the expected task in mind.
+
+## How much context it adds
 
 | harness | avg injected tokens/turn (kta) | continuity |
 |---|---|---|
@@ -120,44 +64,37 @@ the seam lets through.
 | claude-code | 30.9 | 75.3 |
 | codex | 40.7 | 150.9 |
 
-codex's static preamble shows up here (its conversation-start index lands on
-turn 1), exactly the trade the fragments model makes: cheaper plumbing, double
-the context spend on continuity conversations.
-
-## Latency + cost
+The Codex contract's static preamble is included in these token counts. Its lower per-turn fragment allowance did not automatically mean a smaller total context bill: in continuity conversations, the reported average was 150.9 tokens, compared with 75.3 for the other two shapes.
 
 | Adapter | full run wall | per-fixture | LLM calls | cost |
 |---|---|---|---|---|
 | all three, full suite | ~7–10 s | ~60 ms | 0 | $0 |
 
-Hermetic by construction: in-memory PGLite, `noEmbed` seeding, deterministic
-gold extractor through the production write-back pipeline. The `--llm` mode
-(real extractor, budget-capped) is the only paid path and is not part of the
-gate.
+These were local, deterministic runs with in-memory PGLite, no embeddings, and no model calls. The write pipeline received perfect, supplied extractions. A 1.000 write-back score means that this pipeline preserved those inputs and their provenance. It does not mean a model extracted every real-world fact correctly.
 
-## Limits & caveats
+## The September rerun
 
-- **Contract rows are not third-party measurements.** claude-code and codex
-  rows grade gbrain's primitives under those harnesses' injection-shape
-  constraints; the real integrations land later and flip the seam label with
-  continuous numbers. The `seam` column exists so nobody mistakes one for the
-  other.
-- **Injection conformance, not consumption.** know-to-ask and push score what
-  the memory layer surfaced, before any model consumes it. Agent-in-the-loop
-  replay is pre-registered (`--live`) and unimplemented.
-- **Deterministic ≠ stochastic robustness.** stddev is 0 by construction;
-  these numbers say nothing about LLM-extractor variance (that's `--llm`,
-  unpublished).
-- **write-back 1.000 is a floor check, not a victory.** The deterministic mode
-  hands the pipeline perfect extractions; it proves segmentation/insertion/
-  provenance lose nothing. Extraction quality itself is the `--llm` metric.
-- **push_precision 1.000 is expected to FALL** when fuzzy/semantic resolution
-  lands — exact-match arms can't inject junk on this corpus. The pre-registered
-  expectation in the methodology doc says so before the fact.
-- Holdout fixtures (23) are excluded here; published runs with
-  `--include-holdout` will differ slightly.
+On September 1, a keyless run at gbrain `2a56b51236850f6abcbf2f1ea71981bb9630f6fe` (v0.47.8.0) reproduced that release's committed baseline in about 22 seconds at $0 API cost. The corpus had grown to 149 know-to-ask turns and 96 push turns.
 
-## Reproduction
+Missed-trigger and false-fire rates were both zero for all three integrations. Push recall was 0.9063 for OpenClaw, 1.000 for Claude Code, and 0.5521 for Codex, with precision 1.000 throughout. Write-back and continuity remained 1.000, with zero recorded isolation violations. Claude Code's integration was now labeled production; Codex remained a contract row.
+
+These are two release snapshots on different corpora, not a paired experiment that isolates one change. The September run reproduces its own baseline; it cannot authenticate the June run merely by agreeing with a later expected result.
+
+Its receipt says `verdict: fail`. That is consistent with the numbers. This repository's foreign runner demands zero failed gold items in every cell. OpenClaw still missed 9/96 push items and Codex 43/96. Gbrain's own CI instead checks for regression against a committed baseline, which this run matched exactly. Passing a regression check and achieving perfect recall are different standards.
+
+## What these results establish
+
+The suite gives gbrain a repeatable test of when and how to offer memory. It caught a shared name-resolution problem and makes context-budget losses visible. It also checks that supplied facts survive the write path and that the tested sources remain isolated.
+
+It does not measure whether a live answering model reads or uses the injected memory. The agent-in-the-loop replay described as `--live` was not implemented for these runs. The paid `--llm` extraction path was not run. Determinism removes run-to-run randomness from this plumbing test; it does not establish robustness to model variation.
+
+The suite contains 141 fictional conversation fixtures and 241 annotated turns across seven categories, generated with Mulberry32 seed 42. The published June gate uses 118 fixtures; 23 holdout fixtures are excluded. Read-only suites share a seeded brain across adapters. Write/continuity cases reset state between fixtures, and continuity tests persist facts across ordered writer/reader pairs.
+
+There is also a trust limit: this repository grades counters reported by the system under test. It does not independently rescore sealed gold. The receipts show what gbrain's evaluator reported. An independently implemented scorer would provide a stronger check.
+
+## Reproduction and evidence
+
+These are the original reproduction commands. Check out the cited release first when reproducing a historical result; cloning today's default branch tests different software.
 
 ```bash
 # 1. gbrain checkout carrying BrainBench (Cathedral 2 release, > v0.42.40.0)
@@ -169,28 +106,14 @@ bun src/cli.ts eval brainbench --harness all --suite all --json --out /tmp/bb.js
 # 3. or through this repo's runner (imports no gbrain internals)
 cd ../gbrain-evals
 GBRAIN_REPO=../gbrain bun eval/runner/cat34-brainbench-memory.ts
-# receipts: eval/reports/cat34-brainbench-memory/{receipt,scorecard,result}.json
+# receipts: eval/reports/cat34-brainbench-memory/{receipt,result}.json and scorecard.md
 ```
 
-Wall time ~10 s, zero API keys, zero cost. Corpus rebuild (byte-identical):
-`bun evals/brainbench/generator/gen.ts` in the gbrain repo.
+The deterministic corpus can be rebuilt with `bun evals/brainbench/generator/gen.ts` in gbrain. Its June SHA-256 is `76f201590dd3ad7a929e2e12efc9bf1406627b10ef4edbcfe7caf379aafd4090`; the larger September corpus is `509fd20d7cda693350030393b6d54154e2685516d30f017ca219bd25e92c0e57`.
 
-## Methodology details
+The [evidence directory](2026-06-12-brainbench-memory/) contains both runs, with separate `receipt`, `result`, and `scorecard` files:
 
-Fixtures hash `76f201590dd3…` (sha256 over every fixture + sealed gold file).
-One in-memory PGLite per run, `TRUNCATE`-reset between fixtures; read-only
-suites seed once and replay all three adapters against the same brain;
-continuity pairs run per ordered (writer ≠ reader) harness pair with the
-writer's decisions persisted through the production
-`extract-conversation-facts` pipeline via its injectable-extractor seam.
-Counts (failed/gold) are the gate; rates are display. Source isolation gates
-at zero unconditionally. Full formula definitions: gbrain
-`docs/eval/BRAINBENCH.md`; plain-English metric glossary: gbrain
-`docs/eval/METRIC_GLOSSARY.md`.
+- `2026-06-12-published` records gbrain `15a9019788d11619329284c3f0bcbc3b7db045df`, zero seed failures, and 786 per-turn result rows.
+- `2026-09-01-v0.47.8.0-rerun` records the later release and expanded corpus. Its counters match `evals/brainbench/baselines/main.json` at that pin.
 
-## Files
-
-- `eval/runner/cat34-brainbench-memory.ts` — this runner (subprocess contract only)
-- `eval/reports/cat34-brainbench-memory/{receipt.json,scorecard.md,result.json}` — run artifacts
-- gbrain: `src/eval/brainbench/`, `evals/brainbench/` (corpus + schemas + committed baseline), `docs/eval/BRAINBENCH.md` — at the Cathedral 2 release commit (gbrain repo `git log --grep BrainBench` for the exact SHA)
-- Read-only disclosure: this run mutates nothing outside `eval/reports/`.
+The foreign runner is `eval/runner/cat34-brainbench-memory.ts`. The underlying fixtures, schemas, metrics, and CI baseline live in gbrain's `evals/brainbench/` and `src/eval/brainbench/`; metric definitions are in its `docs/eval/BRAINBENCH.md` and `docs/eval/METRIC_GLOSSARY.md`.

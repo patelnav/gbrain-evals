@@ -553,6 +553,10 @@ async function planPullRequestEval(apiUrl) {
       "## BenchRouter PR plan",
       "",
       "Outcome: " + outcome.outcome + " (" + summaryReason + ").",
+      ...(summaryReason === "repository_executable_requires_default_branch" ? [
+        "Merge the evaluator integration with production routing unchanged. BenchRouter can then evaluate the frozen default-branch commit. Review that comparison before activating the call site. This PR has no executable quality result.",
+        ""
+      ] : []),
       ""
     ]);
     return;
@@ -714,7 +718,7 @@ async function buildSnapshotRoute(route, configPath) {
     captured_case_set_sha256: caseSetSha
   }));
   const acceptanceFp = scorerSha;
-  const replayContract = await routeReplayContract(route.casesPath);
+  const planningRequirements = await routePlanningRequirements(route.casesPath);
   return {
     route_id: route.routeId,
     route_slug: route.slug,
@@ -736,14 +740,12 @@ async function buildSnapshotRoute(route, configPath) {
     workflow_path: route.workflowPath,
     code_refs: route.codeRefs || [],
     code_ref_hashes: codeRefHashes,
-    required_parameters: replayContract.requiredParameters,
-    api_families: replayContract.apiFamilies,
-    semantic_controls: replayContract.semanticControls,
-    features: replayContract.features,
-    input_kinds: replayContract.inputKinds,
-    output_kinds: replayContract.outputKinds,
-    protocol_headers: replayContract.protocolHeaders,
-    envelope_content_hash: replayContract.contentHash,
+    required_parameters: planningRequirements.requiredParameters,
+    api_families: planningRequirements.apiFamilies,
+    features: planningRequirements.features,
+    input_kinds: planningRequirements.inputKinds,
+    output_kinds: planningRequirements.outputKinds,
+    protocol_headers: planningRequirements.protocolHeaders,
     eval_pack: route.evalPack,
     metadata: {
       eval_archetype: route.evalArchetype || "",
@@ -766,12 +768,9 @@ async function buildExecutableSnapshotRoute(route, configPath) {
   const acceptanceFp = hashString(canonicalJson({ primary_metric: executable.primaryMetric, acceptance_refs: acceptanceHashes }));
   const caseSetSha = hashString(canonicalJson(inputHashes));
   const scorerSha = hashString(canonicalJson(acceptanceHashes));
-  // Repository-executable evals declare their one protocol family. The rest is
-  // the smallest valid evaluated envelope because the evaluator's request bodies
-  // are not available to the kit at snapshot time.
-  const envelope = { api_families: [executable.apiFamily], semantic_controls: [], features: [], input_kinds: ["input.text"], output_kinds: ["text"], protocol_headers: {} };
-  const envelopeContentHash = hashString(canonicalJson(envelope));
-  return { route_id: route.routeId, route_slug: route.slug, name: route.name, best_model: route.bestModel, eval_fingerprint: hashString(inputFp + ":" + acceptanceFp), input_fingerprint: inputFp, acceptance_fingerprint: acceptanceFp, config_sha256: await hashFile(configPath), scorer_sha256: scorerSha, case_set_sha256: caseSetSha, code_refs_sha256: hashString(canonicalJson(codeRefHashes)), covered_refs_sha256: hashString(canonicalJson([...inputHashes, ...acceptanceHashes, ...codeRefHashes])), case_count: 0, eval_command: route.evalCommand, result_schema: route.resultSchema, scorer_path: executable.acceptanceRefs[0], cases_path: executable.inputRefs[0], workflow_path: route.workflowPath, code_refs: route.codeRefs || [], code_ref_hashes: codeRefHashes, required_parameters: [], api_families: envelope.api_families, semantic_controls: envelope.semantic_controls, features: envelope.features, input_kinds: envelope.input_kinds, output_kinds: envelope.output_kinds, protocol_headers: envelope.protocol_headers, envelope_content_hash: envelopeContentHash, eval_pack: route.evalPack, metadata: { eval_archetype: route.evalArchetype || "", base_url_env: route.baseUrlEnv || "", provider_id: route.providerId || "", provider_ref: route.providerRef || "", observed_model: "" } };
+  // Executable planning has a known API family but no frozen request examples
+  // from which to derive controls, features, media kinds, or protocol headers.
+  return { route_id: route.routeId, route_slug: route.slug, name: route.name, best_model: route.bestModel, eval_fingerprint: hashString(inputFp + ":" + acceptanceFp), input_fingerprint: inputFp, acceptance_fingerprint: acceptanceFp, config_sha256: await hashFile(configPath), scorer_sha256: scorerSha, case_set_sha256: caseSetSha, code_refs_sha256: hashString(canonicalJson(codeRefHashes)), covered_refs_sha256: hashString(canonicalJson([...inputHashes, ...acceptanceHashes, ...codeRefHashes])), case_count: 0, eval_command: route.evalCommand, result_schema: route.resultSchema, scorer_path: executable.acceptanceRefs[0], cases_path: executable.inputRefs[0], workflow_path: route.workflowPath, code_refs: route.codeRefs || [], code_ref_hashes: codeRefHashes, required_parameters: [], api_families: [executable.apiFamily], eval_pack: route.evalPack, metadata: { eval_archetype: route.evalArchetype || "", base_url_env: route.baseUrlEnv || "", provider_id: route.providerId || "", provider_ref: route.providerRef || "", observed_model: "" } };
 }
 
 async function hashDeclaredRefs(refs) {
@@ -799,17 +798,14 @@ async function caseCount(casesPath) {
   return Array.isArray(parsed) ? parsed.length : 0;
 }
 
-async function routeReplayContract(casesPath) {
-  // ROUTE-001: the evaluated contract envelope is computed HERE, from the FULL
-  // local case set, because the corpus never leaves the repository (DATA-001).
-  // One UNKNOWN endpoint FAILS the upload rather than nulling the route
-  // contract, so a route can never serve claiming PPF quality for a family it
-  // was never graded on.
+async function routePlanningRequirements(casesPath) {
+  // CAT-006: discovery uses the full local case set to describe the request
+  // shapes that candidate declarations must support. These requirements plan
+  // compatible eval work. They do not limit later runtime request shapes.
   const parsed = JSON.parse(await readFile(casesPath, "utf8"));
-  if (!Array.isArray(parsed)) return emptyReplayContract();
+  if (!Array.isArray(parsed)) return emptyPlanningRequirements();
   const families = new Set();
   const required = new Set();
-  const semanticControls = new Set();
   const features = new Set();
   const inputKinds = new Set(["input.text"]);
   const anthropicVersions = new Set();
@@ -826,7 +822,7 @@ async function routeReplayContract(casesPath) {
       : endpoint.endsWith("/messages") ? "anthropic_messages"
       : endpoint.endsWith("/responses") ? "openai_responses" : null;
     if (!family) {
-      throw new Error("Unknown eval case endpoint for the route contract envelope: " + endpoint);
+      throw new Error("Unknown eval case endpoint for candidate planning: " + endpoint);
     }
     families.add(family);
     const headers = testCase.headers && typeof testCase.headers === "object" ? testCase.headers : {};
@@ -849,120 +845,38 @@ async function routeReplayContract(casesPath) {
     const core = new Set(["model", "messages", "stream", "route", "provider", "allow_fallbacks"]);
     for (const key of Object.keys(body)) {
       if (core.has(key)) continue;
-      // The exact-zero temperature carve-out belongs to CAT-006 broad-search
-      // admission (`required_parameters`), NOT to the evaluated envelope. The
-      // runtime extractor treats an explicit zero as an explicit control, so
-      // dropping it here would make the envelope a SUBSET of the very request
-      // that was captured.
+      // CAT-006 permits an exact-zero temperature to be omitted for a target
+      // whose current declaration says it does not support that control.
       if (!(key === "temperature" && body[key] === 0)) required.add(key);
-      semanticControls.add(semanticControlName(family, key));
     }
-    // The runtime extractor emits NESTED semantic classes that a top-level key
-    // scan cannot see (thinking type and budget, reasoning children, output
-    // effort, structured outputs, cache control). The envelope must be a
-    // SUPERSET of what the identical request produces at serve time, or that
-    // very request would later fail coverage with route_contract_mismatch.
-    collectNestedSemanticControls(family, body, semanticControls);
-    collectEnvelopeFeatures(family, body, features, inputKinds);
+    collectPlanningFeatures(family, body, features, inputKinds);
   }
-  if (families.size === 0) return emptyReplayContract();
-  const envelope = {
-    api_families: Array.from(families).sort(),
-    semantic_controls: Array.from(semanticControls).sort(),
+  if (families.size === 0) return emptyPlanningRequirements();
+  return {
+    apiFamilies: Array.from(families).sort(),
+    requiredParameters: Array.from(required).sort(),
     features: Array.from(features).sort(),
-    input_kinds: Array.from(inputKinds).sort(),
-    output_kinds: ["text"],
-    protocol_headers: {
+    inputKinds: Array.from(inputKinds).sort(),
+    outputKinds: ["text"],
+    protocolHeaders: {
       anthropic_versions: Array.from(anthropicVersions).sort(),
       anthropic_betas: Array.from(anthropicBetas).sort()
     }
   };
-  return {
-    apiFamilies: envelope.api_families,
-    requiredParameters: Array.from(required).sort(),
-    semanticControls: envelope.semantic_controls,
-    features: envelope.features,
-    inputKinds: envelope.input_kinds,
-    outputKinds: envelope.output_kinds,
-    protocolHeaders: envelope.protocol_headers,
-    contentHash: hashString(canonicalJson(envelope))
-  };
 }
 
-function emptyReplayContract() {
+function emptyPlanningRequirements() {
   return {
     apiFamilies: null,
     requiredParameters: null,
-    semanticControls: null,
     features: null,
     inputKinds: null,
     outputKinds: null,
-    protocolHeaders: null,
-    contentHash: null
+    protocolHeaders: null
   };
 }
 
-// Names never prove equivalence: the same protocol name means a DIFFERENT
-// behaviour class in each family, so the envelope records the class.
-function semanticControlName(family, key) {
-  // SERVE-009: Responses control names ARE their own semantic class. The
-  // runtime extractor records each explicitly supplied top-level field under
-  // its own protocol name, so the envelope records the same name.
-  if (family === "openai_responses") return key;
-  if (family === "anthropic_messages") {
-    if (key === "max_tokens") return "anthropic_total_output_cap";
-    if (key === "output_config") return "anthropic_output_format";
-    return key;
-  }
-  if (key === "max_tokens") return "legacy_visible_output_cap";
-  if (key === "max_completion_tokens") return "total_completion_cap";
-  return key;
-}
-
-// Mirrors src/proxy/request-contract.ts. Every name added here must be one the
-// runtime extractor can emit for the same body; the envelope may be a superset
-// of a single request's contract, never a subset of it.
-function collectNestedSemanticControls(family, body, semanticControls) {
-  if (family === "openai_responses") {
-    // SERVE-009: a Responses envelope is derived from the DISCRIMINATED
-    // request, not from top-level key names alone. A tool choice implies the
-    // `tools` control at serve time even with no top-level `tools` key.
-    if (body.tool_choice !== undefined) semanticControls.add("tools");
-    if (body.parallel_tool_calls !== undefined) semanticControls.add("parallel_tool_calls");
-    return;
-  }
-  const reasoning = body.reasoning;
-  if (reasoning && typeof reasoning === "object" && !Array.isArray(reasoning)) {
-    for (const child of Object.keys(reasoning)) semanticControls.add("reasoning." + child);
-  }
-  if (body.stream_options !== undefined) semanticControls.add("stream_framing");
-  // A tool choice implies the `tools` control at serve time even when the body
-  // carried no top-level `tools` key.
-  if (body.tool_choice !== undefined) semanticControls.add("tools");
-  if (containsKeyDeep(body, "cache_control")) semanticControls.add("cache_control");
-  if (family === "anthropic_messages") {
-    const thinking = body.thinking;
-    if (thinking && typeof thinking === "object" && !Array.isArray(thinking)) {
-      if (typeof thinking.type === "string") semanticControls.add("thinking_type");
-      if (thinking.budget_tokens !== undefined) semanticControls.add("thinking_budget");
-    }
-    const outputConfig = body.output_config;
-    if (outputConfig && typeof outputConfig === "object" && !Array.isArray(outputConfig)) {
-      if (outputConfig.effort !== undefined) semanticControls.add("anthropic_output_effort");
-      if (outputConfig.format !== undefined) semanticControls.add("anthropic_output_format");
-    }
-    return;
-  }
-  const responseFormat = body.response_format;
-  if (responseFormat && typeof responseFormat === "object" && responseFormat.type === "json_schema") {
-    semanticControls.add("structured_outputs");
-  }
-}
-
-// The reasoning MODE, as the runtime bounded summary classifies it. Recorded as
-// a feature class because the same control name covers different behaviour
-// contracts: budgeted thinking is not the same evaluated surface as a bare
-// provider object.
+// Candidate declarations distinguish reasoning modes as feature requirements.
 function reasoningKindFor(family, body) {
   if (family === "openai_responses") {
     const reasoning = body.reasoning;
@@ -985,11 +899,11 @@ function reasoningKindFor(family, body) {
   return "none";
 }
 
-function collectEnvelopeFeatures(family, body, features, inputKinds) {
+function collectPlanningFeatures(family, body, features, inputKinds) {
   const reasoningKind = reasoningKindFor(family, body);
   if (reasoningKind !== "none") features.add("reasoning_kind:" + reasoningKind);
   if (family === "openai_responses") {
-    collectResponsesEnvelopeFeatures(body, features, inputKinds);
+    collectResponsesPlanningFeatures(body, features, inputKinds);
     return;
   }
   if (Array.isArray(body.tools)) {
@@ -1021,12 +935,9 @@ function collectEnvelopeFeatures(family, body, features, inputKinds) {
   collectInputKinds(family, body, inputKinds);
 }
 
-// SERVE-009: derive the Responses envelope from the DISCRIMINATED request —
-// item kinds, tool strictness, tool choice, parallel behaviour, structured
-// output, reasoning controls, encrypted-reasoning use, and input content kinds.
-// Every name here is one the runtime extractor emits for the same body, so the
-// envelope is a superset of that request's contract and never a subset.
-function collectResponsesEnvelopeFeatures(body, features, inputKinds) {
+// SERVE-009: retain Responses feature and media requirements for declaration-
+// compatible candidate planning.
+function collectResponsesPlanningFeatures(body, features, inputKinds) {
   const reasoning = body.reasoning;
   if (reasoning && typeof reasoning === "object" && !Array.isArray(reasoning)) {
     for (const control of ["effort", "summary", "context"]) {
@@ -1055,7 +966,7 @@ function collectResponsesEnvelopeFeatures(body, features, inputKinds) {
     }
   }
   // Statelessness and authoritative cost are required on every Responses
-  // attempt, so the envelope records them for every graded case.
+  // attempt, so candidate planning records them for every case.
   features.add("responses.stateless_store_false");
   features.add("responses.authoritative_cost");
   const input = body.input;
@@ -1257,7 +1168,21 @@ async function runAdaptiveSession(apiUrl) {
     const progress = current.progress || {};
     console.log("BenchRouter progress: " + (progress.models_completed ?? completedInSession) + " models complete across " + (progress.tranches_completed ?? current.tranche) + " tranches");
   }
-  console.log("BenchRouter complete: selected " + (current.selected_model || "the current best model") + " for " + requiredEnv("BENCHROUTER_ROUTE_ID"));
+  // EVAL-011: terminal execution is not evidence of a successful evaluation.
+  if (current.status === "failed" || current.status === "expired") {
+    await appendStepSummary(["## BenchRouter evaluation did not complete", "", "No new model selection was verified. Inspect the model failure diagnostics.", ""]);
+    throw new Error("BenchRouter evaluation " + current.status + "; no new model selection was verified");
+  }
+  const progress = current.progress || {};
+  const scoredAttempts = Number(progress.models_scored ?? 0);
+  const failedAttempts = Number(progress.models_failed ?? 0);
+  const skippedModels = Number(progress.models_skipped ?? 0);
+  const ppfOutcome = current.selected_model
+    ? (current.baseline_model && current.selected_model === current.baseline_model
+      ? "The baseline remains best on the current PPF."
+      : "Current PPF best: " + current.selected_model + (current.baseline_model ? " (baseline: " + current.baseline_model + ")" : ""))
+    : "No best model was verified on the current PPF.";
+  console.log("BenchRouter workflow complete: " + scoredAttempts + " scored attempts, " + failedAttempts + " infrastructure or incomplete failures, " + skippedModels + " skipped models. " + ppfOutcome);
   await appendStepSummary([
     "## BenchRouter route test complete",
     "",
@@ -1266,9 +1191,12 @@ async function runAdaptiveSession(apiUrl) {
     "| Result | Value |",
     "| --- | --- |",
     "| Route | " + requiredEnv("BENCHROUTER_ROUTE_ID") + " |",
-    "| Selected model | " + (current.selected_model || "-") + " |",
-    "| Models checked | " + (current.progress?.models_completed ?? completedInSession) + " |",
-    "| Tranches | " + (current.progress?.tranches_completed ?? "-") + " |",
+    "| Workflow outcome | Completed (informational) |",
+    "| Scored attempts | " + scoredAttempts + " |",
+    "| Infrastructure or incomplete failures | " + failedAttempts + " |",
+    "| Skipped models | " + skippedModels + " |",
+    "| PPF outcome | " + markdownCell(ppfOutcome) + " |",
+    "| Tranches | " + (progress.tranches_completed ?? "-") + " |",
     ""
   ]);
 }
@@ -1299,14 +1227,18 @@ async function runModelPackMembers(apiUrl, members, baseEnv) {
       BENCHROUTER_UPLOAD_RESULTS: "1"
     };
     let session = null;
+    let executionFailure = null;
     try {
       console.log("BenchRouter model started: " + member.model);
       session = await exchangeUploadToken(apiUrl, member.model_run_id, await requestGitHubOidcToken(modelRunAudience(member.model_run_id)));
       runtimeEnv.BENCHROUTER_UPLOAD_TOKEN = session.uploadToken;
       runtimeEnv.BENCHROUTER_EVAL_CALL_TOKEN_MODEL = session.evalCallTokens.model || "";
       runtimeEnv.BENCHROUTER_EVAL_CALL_TOKEN_JUDGE = session.evalCallTokens.judge || "";
-      const code = await runModel(runtimeEnv);
-      if (code !== 0) throw new Error("model replay failed with exit code " + code);
+      const result = await runModelMeasured(runtimeEnv);
+      if (result.code !== 0) {
+        executionFailure = result.executionFailure;
+        throw new Error("model replay failed with exit code " + result.code);
+      }
       await uploadModelResults(apiUrl, runtimeEnv);
       completed += 1;
       console.log("BenchRouter model complete: " + member.model);
@@ -1314,7 +1246,8 @@ async function runModelPackMembers(apiUrl, members, baseEnv) {
       failed += 1;
       console.error("BenchRouter pack member failed", member.model_run_id, error);
       try {
-        runtimeEnv.BENCHROUTER_FAILED_STEP = session ? "run-or-upload" : "start";
+        if (executionFailure) runtimeEnv.BENCHROUTER_EXECUTION_FAILURE_JSON = JSON.stringify(executionFailure);
+        runtimeEnv.BENCHROUTER_FAILED_STEP = executionFailure ? "evaluator" : session ? "run-or-upload" : "start";
         runtimeEnv.BENCHROUTER_GITHUB_CONCLUSION = "failure";
         const failureOidc = await requestGitHubOidcToken(modelRunAudience(member.model_run_id));
         await notifyFailure(apiUrl, member.model_run_id, session?.uploadToken || "", failureOidc, false, runtimeEnv);
@@ -1343,8 +1276,14 @@ async function runModelMeasured(runtimeEnv) {
   if (runtimeEnv.BENCHROUTER_EVAL_MODE === "repository_executable") {
     const route = await runtimeRoute(runtimeEnv);
     const startedAt = Date.now();
-    const code = await runArgv(route.executable.argv, executableChildEnv(route, runtimeEnv), route.executable.timeoutMinutes * 60 * 1000);
-    return { code, elapsedSeconds: Math.max(1, Math.ceil((Date.now() - startedAt) / 1000)) };
+    const outcome = await runArgv(route.executable.argv, executableChildEnv(route, runtimeEnv), route.executable.timeoutMinutes * 60 * 1000);
+    const executionFailure = outcome.code === 0 ? null : executableFailureDiagnostic(outcome);
+    if (executionFailure) {
+      runtimeEnv.BENCHROUTER_EXECUTION_FAILURE_JSON = JSON.stringify(executionFailure);
+      runtimeEnv.BENCHROUTER_FAILED_STEP = "evaluator";
+      await persistFailureDiagnostic(false, runtimeEnv);
+    }
+    return { code: outcome.code, elapsedSeconds: Math.max(1, Math.ceil((Date.now() - startedAt) / 1000)), executionFailure };
   }
   const command = REPLAY_HARNESS_COMMAND;
   assertReplayOnlyCommand(command);
@@ -1354,7 +1293,7 @@ async function runModelMeasured(runtimeEnv) {
       BENCHROUTER_FORCE_MODEL: runtimeEnv.BENCHROUTER_FORCE_MODEL || runtimeEnv.BENCHROUTER_MODEL_ID,
       BENCHROUTER_RESULTS_SUFFIX: runtimeEnv.BENCHROUTER_RESULTS_SUFFIX || safeResultSuffix(runtimeEnv.BENCHROUTER_MODEL_RUN_ID || runtimeEnv.BENCHROUTER_MODEL_ID)
     });
-  return { code, elapsedSeconds: Math.max(1, Math.ceil((Date.now() - startedAt) / 1000)) };
+  return { code, elapsedSeconds: Math.max(1, Math.ceil((Date.now() - startedAt) / 1000)), executionFailure: null };
 }
 
 async function runtimeRoute(runtimeEnv) {
@@ -1371,8 +1310,8 @@ async function installExecutableDependencies() {
   const route = await runtimeRoute(process.env);
   if (route.evalMode !== "repository_executable") return;
   const argv = route.executable.runtime === "bun" ? ["bun", "install", "--frozen-lockfile", "--ignore-scripts"] : ["npm", "ci", "--ignore-scripts"];
-  const code = await runArgv(argv, executableChildEnv(route, process.env, false), route.executable.timeoutMinutes * 60 * 1000);
-  if (code !== 0) throw new Error("BenchRouter executable dependency install failed with exit code " + code);
+  const outcome = await runArgv(argv, executableChildEnv(route, process.env, false), route.executable.timeoutMinutes * 60 * 1000);
+  if (outcome.code !== 0) throw new Error("BenchRouter executable dependency install failed with exit code " + outcome.code);
 }
 
 function executableChildEnv(route, runtimeEnv, includeSecrets = true) {
@@ -1393,10 +1332,24 @@ async function runArgv(argv, env, timeoutMs) {
   if (!Array.isArray(argv) || argv.length === 0) throw new Error("Executable argv is empty");
   return new Promise((resolve) => {
     const child = spawn(argv[0], argv.slice(1), { shell: false, stdio: "inherit", env });
-    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
-    child.on("error", (error) => { clearTimeout(timer); console.error(error); resolve(1); });
-    child.on("exit", (code, signal) => { clearTimeout(timer); if (signal) console.error("BenchRouter executable terminated by signal " + signal); resolve(signal ? 1 : code ?? 1); });
+    let timedOut = false;
+    let settled = false;
+    const finish = (outcome) => { if (settled) return; settled = true; clearTimeout(timer); resolve(outcome); };
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
+    child.on("error", (error) => { console.error(error); finish({ code: 1, exitCode: null, signal: null, timedOut: false, startFailed: true }); });
+    child.on("exit", (code, signal) => {
+      if (signal) console.error("BenchRouter executable terminated by signal " + signal);
+      finish({ code: timedOut || signal ? 1 : code ?? 1, exitCode: timedOut || signal ? null : code, signal: signal || null, timedOut, startFailed: false });
+    });
   });
+}
+
+function executableFailureDiagnostic(outcome) {
+  const base = { phase: "evaluator", exit_code: null, signal: null, timed_out: false };
+  if (outcome.startFailed) return { ...base, reason: "process_start_failed" };
+  if (outcome.timedOut) return { ...base, reason: "process_timeout", signal: safeCode(outcome.signal), timed_out: true };
+  if (outcome.signal) return { ...base, reason: "process_signal", signal: safeCode(outcome.signal) };
+  return { ...base, reason: "process_exit", exit_code: Number.isInteger(outcome.exitCode) && outcome.exitCode > 0 ? outcome.exitCode : 1 };
 }
 
 async function runShell(command, env) {
@@ -1495,8 +1448,26 @@ async function uploadExecutableResults(apiUrl, runtimeEnv, route, uploadToken, r
   const fingerprint = await buildFingerprint(results, runtimeEnv);
   // The server derives the exact candidate model-call set from durable rows.
   // Do not require the evaluator to echo response header IDs.
-  const response = await fetch(apiUrl + "/v1/eval-model-runs/" + encodeURIComponent(modelRunId) + "/results", { method: "POST", headers: { authorization: "Bearer " + uploadToken, "content-type": "application/json" }, body: JSON.stringify({ result_set_id: resultSetId, action: "run", fingerprint, quality: { primary_metric: primary, metrics: receipt.metrics || {} }, results }) });
-  if (!response.ok) throw new Error("BenchRouter executable result upload failed (" + response.status + " ): " + (await response.text()).slice(0, 500));
+  const body = JSON.stringify({ result_set_id: resultSetId, action: "run", fingerprint, quality: { primary_metric: primary, metrics: receipt.metrics || {} }, results });
+  const retryDeadline = Date.now() + 10000;
+  let retryDelayMs = 250;
+  while (true) {
+    const remainingMs = Math.max(1, retryDeadline - Date.now());
+    const response = await fetch(apiUrl + "/v1/eval-model-runs/" + encodeURIComponent(modelRunId) + "/results", { method: "POST", headers: { authorization: "Bearer " + uploadToken, "content-type": "application/json" }, body, signal: AbortSignal.timeout(remainingMs) });
+    if (response.ok) return;
+    const responseText = await response.text();
+    let responseCode = "";
+    try {
+      const parsed = JSON.parse(responseText);
+      responseCode = parsed && typeof parsed === "object" && typeof parsed.error?.code === "string" ? parsed.error.code : "";
+    } catch {}
+    if (response.status !== 409 || responseCode !== "eval_results_pending" || Date.now() + retryDelayMs > retryDeadline) {
+      throw new Error("BenchRouter executable result upload failed (" + response.status + " ): " + responseText.slice(0, 500));
+    }
+    console.warn("BenchRouter executable result upload is waiting for call settlement; retrying in " + retryDelayMs + "ms");
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    retryDelayMs = Math.min(retryDelayMs * 2, 2000);
+  }
 }
 
 function resultFilePath(runtimeEnv) {
@@ -1517,6 +1488,11 @@ function runErrorFilePath(runtimeEnv) {
 function uploadErrorFilePath(runtimeEnv) {
   const suffix = safeResultSuffix(runtimeEnv.BENCHROUTER_RESULTS_SUFFIX || runtimeEnv.BENCHROUTER_MODEL_RUN_ID || runtimeEnv.BENCHROUTER_MODEL_ID || "model");
   return ".benchrouter/upload-error." + suffix + ".json";
+}
+
+function failureDiagnosticFilePath(runtimeEnv) {
+  const suffix = safeResultSuffix(runtimeEnv.BENCHROUTER_RESULTS_SUFFIX || runtimeEnv.BENCHROUTER_MODEL_RUN_ID || runtimeEnv.BENCHROUTER_MODEL_ID || "model");
+  return ".benchrouter/failure." + suffix + ".json";
 }
 
 async function buildFingerprint(results, runtimeEnv = process.env) {
@@ -1594,7 +1570,7 @@ async function exchangeUploadToken(apiUrl, modelRunId, oidcToken) {
 }
 
 async function notifyFailure(apiUrl, modelRunId, uploadToken, oidcToken, timedOut, runtimeEnv = process.env) {
-  const diagnostic = await buildFailureDiagnostic(timedOut, runtimeEnv);
+  const diagnostic = await persistFailureDiagnostic(timedOut, runtimeEnv);
   const headers = { "content-type": "application/json", "x-benchrouter-github-oidc": oidcToken };
   if (uploadToken) headers.authorization = "Bearer " + uploadToken;
   const response = await fetch(apiUrl + "/v1/eval-model-runs/" + encodeURIComponent(modelRunId) + "/failure", {
@@ -1607,6 +1583,12 @@ async function notifyFailure(apiUrl, modelRunId, uploadToken, oidcToken, timedOu
   if (!response.ok) {
     throw new Error("BenchRouter failure notification failed (" + response.status + "): " + (await response.text()).slice(0, 500));
   }
+}
+
+async function persistFailureDiagnostic(timedOut, runtimeEnv) {
+  const diagnostic = await buildFailureDiagnostic(timedOut, runtimeEnv);
+  await writeFile(failureDiagnosticFilePath(runtimeEnv), JSON.stringify(diagnostic) + "\n");
+  return diagnostic;
 }
 
 async function buildFailureDiagnostic(timedOut, runtimeEnv) {
@@ -1633,8 +1615,28 @@ async function buildFailureDiagnostic(timedOut, runtimeEnv) {
     : failed.length > 0 ? FAILURE_REASON_CODES.caseFailures
     : FAILURE_REASON_CODES.workflowStepFailed;
   const planned = rows.length > 0 ? rows.length : failed.length;
-  return { v: 1, source: "workflow_fail_step", reason_code: reasonCode, failed_step: failedStep, github_conclusion: conclusion,
+  const diagnostic = { v: 1, source: "workflow_fail_step", reason_code: reasonCode, failed_step: failedStep, github_conclusion: conclusion,
     cases: planned > 0 ? { planned, succeeded, failed } : null };
+  const execution = parseExecutionFailure(runtimeEnv.BENCHROUTER_EXECUTION_FAILURE_JSON);
+  if (execution && reasonCode === FAILURE_REASON_CODES.workflowStepFailed && planned === 0) diagnostic.execution = execution;
+  return diagnostic;
+}
+
+function parseExecutionFailure(raw) {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 512) return null;
+  try {
+    const value = JSON.parse(raw);
+    if (!value || typeof value !== "object" || value.phase !== "evaluator") return null;
+    if (!["process_start_failed", "process_exit", "process_signal", "process_timeout"].includes(value.reason)) return null;
+    const exitCode = Number.isInteger(value.exit_code) && value.exit_code > 0 && value.exit_code <= 2147483647 ? value.exit_code : null;
+    const signal = safeCode(value.signal);
+    const timedOut = value.timed_out === true;
+    if (value.reason === "process_start_failed" && (exitCode !== null || signal !== null || timedOut)) return null;
+    if (value.reason === "process_exit" && (exitCode === null || signal !== null || timedOut)) return null;
+    if (value.reason === "process_signal" && (exitCode !== null || signal === null || timedOut)) return null;
+    if (value.reason === "process_timeout" && (exitCode !== null || !timedOut)) return null;
+    return { phase: "evaluator", reason: value.reason, exit_code: exitCode, signal, timed_out: timedOut };
+  } catch { return null; }
 }
 
 function failedCase(caseId, failure, modelCallId, latencyMs) {

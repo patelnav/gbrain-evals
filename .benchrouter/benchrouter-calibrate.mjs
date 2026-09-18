@@ -129,6 +129,7 @@ function parseBenchRouterManifest(yamlText, configPath) {
     const mode = entry.eval_pack.mode === "repository_executable" ? "repository_executable" : "isolated_replay";
     const executable = mode === "repository_executable" ? {
       argv: requiredManifestStringList(entry.eval_pack.argv, prefix + ".eval_pack.argv"),
+      apiFamily: requiredManifestString(entry.eval_pack.api_family, prefix + ".eval_pack.api_family"),
       runtime: requiredManifestString(entry.eval_pack.runtime, prefix + ".eval_pack.runtime"),
       runtimeVersion: requiredExactRuntimeVersion(entry.eval_pack.runtime_version, prefix + ".eval_pack.runtime_version"),
       lockfile: requiredManifestRepoPath(entry.eval_pack.lockfile, prefix + ".eval_pack.lockfile"),
@@ -142,6 +143,7 @@ function parseBenchRouterManifest(yamlText, configPath) {
       timeoutMinutes: requiredManifestPositiveInteger(entry.eval_pack.timeout_minutes, prefix + ".eval_pack.timeout_minutes"),
       secretEnv: Array.isArray(entry.eval_pack.secret_env) ? requiredManifestUniqueList(entry.eval_pack.secret_env, prefix + ".eval_pack.secret_env") : []
     } : null;
+    if (executable && executable.apiFamily !== "openai_chat_completions" && executable.apiFamily !== "anthropic_messages" && executable.apiFamily !== "openai_responses") throw new Error(prefix + ".eval_pack.api_family must be openai_chat_completions, anthropic_messages, or openai_responses");
     if (executable && executable.runtime !== "node" && executable.runtime !== "bun") throw new Error(prefix + ".eval_pack.runtime must be node or bun");
     if (executable && executable.runtime === "bun" && executable.lockfile !== "bun.lock" && executable.lockfile !== "bun.lockb") throw new Error(prefix + ".eval_pack.lockfile must be bun.lock or bun.lockb for Bun");
     if (executable && executable.runtime === "node" && executable.lockfile !== "package-lock.json" && executable.lockfile !== "npm-shrinkwrap.json") throw new Error(prefix + ".eval_pack.lockfile must be package-lock.json or npm-shrinkwrap.json for Node");
@@ -190,7 +192,7 @@ async function readBenchRouterManifest(configPath = ".benchrouter/benchrouter.ym
 
 const SANDBOX_CJS_SHIM = "globalThis.module = { exports: {} };\nglobalThis.exports = globalThis.module.exports;\nglobalThis.require = function (id) {\n  var error = new Error('BenchRouter scorer sandbox: require/import is forbidden (attempted: ' + id + ')');\n  error.benchrouter_error_code = 'sandbox_violation';\n  error.benchrouter_stage = 'scorer';\n  throw error;\n};\nglobalThis.console = { log() {}, info() {}, warn() {}, error() {}, debug() {} };";
 const SANDBOX_LOCAL_CONSOLE = "var __benchrouter_consoleBridge = globalThis.__benchrouter_hostConsole;\ndelete globalThis.__benchrouter_hostConsole;\nfunction __benchrouter_consoleArgs(args) {\n  var out = [];\n  for (var i = 0; i < args.length; i++) {\n    var value = args[i];\n    if (typeof value === 'string') out.push(value);\n    else {\n      try { out.push(JSON.stringify(value)); }\n      catch (err) { out.push(String(value)); }\n    }\n  }\n  return out;\n}\nfunction __benchrouter_sendConsole(level, args) {\n  if (typeof __benchrouter_consoleBridge === 'function') {\n    __benchrouter_consoleBridge(level, JSON.stringify(__benchrouter_consoleArgs(args)));\n  }\n}\nglobalThis.console = {\n  log: function () { __benchrouter_sendConsole('log', Array.prototype.slice.call(arguments)); },\n  info: function () { __benchrouter_sendConsole('info', Array.prototype.slice.call(arguments)); },\n  warn: function () { __benchrouter_sendConsole('warn', Array.prototype.slice.call(arguments)); },\n  error: function () { __benchrouter_sendConsole('error', Array.prototype.slice.call(arguments)); },\n  debug: function () { __benchrouter_sendConsole('debug', Array.prototype.slice.call(arguments)); }\n};";
-const SANDBOX_MEMBRANE = "globalThis.__benchrouter_scorer = (globalThis.module.exports && typeof globalThis.module.exports.score === 'function') ? globalThis.module.exports.score : (globalThis.benchrouterScorer && globalThis.benchrouterScorer.score);\nglobalThis.__benchrouter_makeJudge = function (hostJudge) {\n  return async function judge(messages) {\n    var payload;\n    try { payload = JSON.stringify(messages); } catch (stringifyErr) {\n      throw new Error('judge messages are not serializable');\n    }\n    if (typeof payload !== 'string') { payload = 'null'; }\n    var reply;\n    try {\n      reply = await hostJudge(payload);\n    } catch (hostErr) {\n      throw new Error('judge call failed: ' + (hostErr && hostErr.message ? String(hostErr.message) : String(hostErr)));\n    }\n    return typeof reply === 'string' ? reply : String(reply == null ? '' : reply);\n  };\n};\nglobalThis.__benchrouter_run = async function (payloadJson, judgeWrapper) {\n  var data = JSON.parse(payloadJson);\n  if (judgeWrapper) { if (!data.metadata) data.metadata = {}; data.metadata.judge = judgeWrapper; }\n  if (typeof globalThis.__benchrouter_scorer !== 'function') { throw new Error('scorer score() missing'); }\n  var result = await globalThis.__benchrouter_scorer(data);\n  var checks = result && Array.isArray(result.checks) ? result.checks.map(String) : [];\n  var reasons = result && Array.isArray(result.reasons) ? result.reasons.map(String) : [];\n  return JSON.stringify({ pass: !!(result && result.pass === true), checks: checks, reasons: reasons });\n};";
+const SANDBOX_MEMBRANE = "globalThis.__benchrouter_scorer = (globalThis.module.exports && typeof globalThis.module.exports.score === 'function') ? globalThis.module.exports.score : (globalThis.benchrouterScorer && globalThis.benchrouterScorer.score);\nglobalThis.__benchrouter_makeJudge = function (hostJudge) {\n  return async function judge(messages) {\n    var payload;\n    try { payload = JSON.stringify(messages); } catch (stringifyErr) {\n      throw new Error('judge messages are not serializable');\n    }\n    if (typeof payload !== 'string') { payload = 'null'; }\n    var reply;\n    try {\n      reply = await hostJudge(payload);\n    } catch (hostErr) {\n      throw new Error('judge call failed: ' + (hostErr && hostErr.message ? String(hostErr.message) : String(hostErr)));\n    }\n    return typeof reply === 'string' ? reply : String(reply == null ? '' : reply);\n  };\n};\nglobalThis.__benchrouter_run = async function (payloadJson, judgeWrapper) {\n  var data = JSON.parse(payloadJson);\n  if (judgeWrapper) { if (!data.metadata) data.metadata = {}; data.metadata.judge = judgeWrapper; }\n  if (typeof globalThis.__benchrouter_scorer !== 'function') { throw new Error('scorer score() missing'); }\n  var result = await globalThis.__benchrouter_scorer(data);\n  var checks = result && Array.isArray(result.checks) ? result.checks : [];\n  for (var checkIndex = 0; checkIndex < checks.length; checkIndex++) {\n    var check = checks[checkIndex];\n    if (typeof check === 'string') { continue; }\n    if (!check || typeof check !== 'object' || Array.isArray(check)) { throw new Error('scorer result.checks[' + checkIndex + '] must be an object'); }\n    var checkKeys = Object.keys(check).sort();\n    if (checkKeys.length !== 4 || checkKeys[0] !== 'code_ref' || checkKeys[1] !== 'detail' || checkKeys[2] !== 'name' || checkKeys[3] !== 'pass') {\n      throw new Error('scorer result.checks[' + checkIndex + '] must contain exactly name, pass, detail, and code_ref');\n    }\n    if (typeof check.name !== 'string' || check.name.trim().length === 0) { throw new Error('scorer result.checks[' + checkIndex + '].name must be a non-empty string'); }\n    if (typeof check.pass !== 'boolean') { throw new Error('scorer result.checks[' + checkIndex + '].pass must be a boolean'); }\n    if (typeof check.detail !== 'string' || check.detail.trim().length === 0) { throw new Error('scorer result.checks[' + checkIndex + '].detail must be a non-empty string'); }\n    if (typeof check.code_ref !== 'string' || check.code_ref.trim().length === 0) { throw new Error('scorer result.checks[' + checkIndex + '].code_ref must be a non-empty string'); }\n  }\n  var reasons = result && Array.isArray(result.reasons) ? result.reasons.map(String) : [];\n  return JSON.stringify({ pass: !!(result && result.pass === true), checks: checks, reasons: reasons });\n};";
 const SCORER_LOAD_TIMEOUT_MS = 5000;
 const SCORER_SCORE_TIMEOUT_MS = 20000;
 const MAX_MUTATIONS = 120;
@@ -207,6 +209,7 @@ async function main() {
         throw new Error("No route matched BENCHROUTER_ROUTE_ID=" + JSON.stringify(routeFilter));
     }
     console.log("BenchRouter local scorer calibration");
+    console.log("Scope: local scorer behavior only. This does not prove task quality, routing eligibility, observed runtime traffic, or production readiness.");
     console.log("Scorer console is LIVE in this local command. CI evals keep console no-op.");
     let failures = 0;
     for (const route of selected) {
@@ -249,7 +252,7 @@ async function calibrateRoute(route) {
     if (archetype === "human-read") {
         return calibrateHumanRead(route, scorerSource, cases, calibration);
     }
-    console.log("Result: UNVERIFIED - this route is marked neither-defensible, so no scorer certification is issued.");
+    console.log("Result: UNVERIFIED - this route is marked neither-defensible, so no local scorer calibration pass is reported.");
     return false;
 }
 async function calibrateRepositoryExecutable(route) {
@@ -304,9 +307,9 @@ async function calibrateStructured(route, scorerSource, cases, explicitFixtures)
     const fixtureResults = await runFixtureChecks(route.scorer, scorerSource, explicitFixtures, []);
     printFixtureResults("Explicit calibration fixtures", fixtureResults);
     const ok = report.certified && fixtureResults.every((result) => result.ok);
-    console.log("Result: " + (ok ? "CERTIFIED" : "NOT CERTIFIED"));
+    console.log("Result: LOCAL SCORER CALIBRATION " + (ok ? "PASSED" : "FAILED"));
     if (!report.certified) {
-        console.log("Certification blockers: " + (report.certifiedReasons.join("; ") || "strict mutation-cert failed"));
+        console.log("Local scorer calibration blockers: " + (report.certifiedReasons.join("; ") || "strict mutation checks failed"));
     }
     return ok;
 }
@@ -324,11 +327,11 @@ async function calibrateHumanRead(route, scorerSource, cases, calibration) {
     if (cases.length > 0) {
         const advisory = await runMutationCert(scorerSource, cases, route.scorer, { judge: "probe" });
         console.log("");
-        console.log("Advisory deterministic mutations (not a human-read cert):");
+        console.log("Advisory deterministic mutations (not a human-read task-quality result):");
         console.log(formatReport(advisory));
         console.log("Mutation output above is advisory only for human-read routes; fixture/rubric checks are the hard local gate.");
     }
-    console.log("Result: " + (ok ? "CALIBRATED (NO MUTATION-CERT ISSUED)" : "NOT CALIBRATED"));
+    console.log("Result: LOCAL SCORER FIXTURE CALIBRATION " + (ok ? "PASSED" : "FAILED"));
     return ok;
 }
 async function runFixtureChecks(scorerName, scorerSource, explicitFixtures, implicitGood) {
@@ -657,7 +660,7 @@ function formatReport(report) {
     const a = report.totals.advisory;
     return [
         "Scorer: " + report.scorerName + "  (judge mode: " + report.judgeMode + ")",
-        "  -- CARDINAL (counts toward certification) --",
+        "  -- CARDINAL (counts toward local scorer calibration) --",
         "  CARDINAL false-pass on corruptions: " + c.corruptionFalsePass + "  " + (c.corruptionFalsePass === 0 ? "(OK)" : "(FAIL)"),
         "  corruptions caught (deterministic): " + c.corruptionCaught,
         "  corruptions needing a judge:        " + c.corruptionNeedsJudge,
@@ -674,7 +677,7 @@ function formatReport(report) {
         "  skipped cases:                      " + report.totals.skippedCases,
         "  total mutation results:             " + report.totals.mutationResults,
         "  cardinal field paths:               " + (report.cardinalPaths.join(", ") || "(none)"),
-        "  OFFLINE-CERTIFIED: " + (report.certified ? "YES" : "NO - " + (report.certifiedReasons.join("; ") || "strict certification failed"))
+        "  LOCAL SCORER CALIBRATION: " + (report.certified ? "PASS" : "FAIL - " + (report.certifiedReasons.join("; ") || "strict mutation checks failed"))
     ].join("\n");
 }
 function loadScorerFromSource(source, scorerName) {
@@ -724,8 +727,8 @@ function loadScorerFromSource(source, scorerName) {
         const parsed = JSON.parse(resultJson);
         return {
             pass: parsed.pass === true,
-            checks: Array.isArray(parsed.checks) ? parsed.checks.map(String) : [],
-            reasons: Array.isArray(parsed.reasons) ? parsed.reasons.map(String) : []
+            checks: parsed.checks,
+            reasons: parsed.reasons
         };
     };
 }

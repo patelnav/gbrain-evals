@@ -5,15 +5,13 @@ import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
 
 const apiUrl = (process.env.BENCHROUTER_API_URL || "https://api.benchrouter.com").replace(/\/+$/, "");
 const apiKey = process.env.BENCHROUTER_API_KEY || "";
-// OPTIONAL eval context. When present the sidecar forces a planned model with a
-// server-issued eval-call token (x-benchrouter-model-run-id /
-// x-benchrouter-eval-call-token / x-benchrouter-force-model) so the
+// OPTIONAL eval context. When present the sidecar authenticates with a
+// server-issued eval-call token in the normal Authorization slot so the
 // per-(request_fingerprint, model) cache is seeded during
 // capture. Absent ⇒ plain route resolution (the route's best model = the
 // current best model at capture time). Either way the captured reference_output is real.
 const modelRunId = process.env.BENCHROUTER_MODEL_RUN_ID || "";
 const evalCallToken = process.env.BENCHROUTER_EVAL_CALL_TOKEN || process.env.BENCHROUTER_EVAL_CALL_TOKEN_MODEL || "";
-const forceModel = process.env.BENCHROUTER_FORCE_MODEL || "";
 // Capture provenance for the server's non-blocking "re-capture recommended"
 // drift advisory. The capture entrypoint (which has repo FS access) MUST compute
 // this with the SAME scheme the server's drift recompute + evalSpecForRoute use:
@@ -154,6 +152,7 @@ function parseBenchRouterManifest(yamlText, configPath) {
     const mode = entry.eval_pack.mode === "repository_executable" ? "repository_executable" : "isolated_replay";
     const executable = mode === "repository_executable" ? {
       argv: requiredManifestStringList(entry.eval_pack.argv, prefix + ".eval_pack.argv"),
+      apiFamily: requiredManifestString(entry.eval_pack.api_family, prefix + ".eval_pack.api_family"),
       runtime: requiredManifestString(entry.eval_pack.runtime, prefix + ".eval_pack.runtime"),
       runtimeVersion: requiredExactRuntimeVersion(entry.eval_pack.runtime_version, prefix + ".eval_pack.runtime_version"),
       lockfile: requiredManifestRepoPath(entry.eval_pack.lockfile, prefix + ".eval_pack.lockfile"),
@@ -167,6 +166,7 @@ function parseBenchRouterManifest(yamlText, configPath) {
       timeoutMinutes: requiredManifestPositiveInteger(entry.eval_pack.timeout_minutes, prefix + ".eval_pack.timeout_minutes"),
       secretEnv: Array.isArray(entry.eval_pack.secret_env) ? requiredManifestUniqueList(entry.eval_pack.secret_env, prefix + ".eval_pack.secret_env") : []
     } : null;
+    if (executable && executable.apiFamily !== "openai_chat_completions" && executable.apiFamily !== "anthropic_messages" && executable.apiFamily !== "openai_responses") throw new Error(prefix + ".eval_pack.api_family must be openai_chat_completions, anthropic_messages, or openai_responses");
     if (executable && executable.runtime !== "node" && executable.runtime !== "bun") throw new Error(prefix + ".eval_pack.runtime must be node or bun");
     if (executable && executable.runtime === "bun" && executable.lockfile !== "bun.lock" && executable.lockfile !== "bun.lockb") throw new Error(prefix + ".eval_pack.lockfile must be bun.lock or bun.lockb for Bun");
     if (executable && executable.runtime === "node" && executable.lockfile !== "package-lock.json" && executable.lockfile !== "npm-shrinkwrap.json") throw new Error(prefix + ".eval_pack.lockfile must be package-lock.json or npm-shrinkwrap.json for Node");
@@ -344,10 +344,16 @@ function redact(value, basePath, redactions) {
   return value;
 }
 
-// The exact request the app emitted, minus `model` (the proxy overrides it with
-// the route id / forced model) and minus known client-injected volatile ids so
-// the captured input replays faithfully and dedupes stably.
-const VOLATILE_BODY_KEYS = ["model", "idempotency_key", "request_id", "trace_id", "x_request_id", "user"];
+// The exact request the app emitted, minus every BenchRouter SELECTOR and minus
+// known client-injected volatile ids, so the captured input replays faithfully,
+// dedupes stably, and passes the narrower eval ingress contract.
+//
+// `route`, `model`, `provider`, and `allow_fallbacks` are BenchRouter routing
+// controls, not protocol payload. They are stripped from the stored replay body
+// and the normalized routing context is recorded separately as bounded case
+// metadata.
+const ROUTING_SELECTOR_KEYS = ["route", "model", "provider", "allow_fallbacks"];
+const VOLATILE_BODY_KEYS = [...ROUTING_SELECTOR_KEYS, "idempotency_key", "request_id", "trace_id", "x_request_id", "user"];
 function normalizeInput(body) {
   if (!body || typeof body !== "object") return {};
   const input = {};
@@ -357,16 +363,49 @@ function normalizeInput(body) {
   return input;
 }
 
+// Bounded routing context for the captured case. Names only, never values that
+// could carry prompt or user data.
+function routingContext(body) {
+  if (!body || typeof body !== "object") return {};
+  const context = {};
+  if (typeof body.route === "string") context.route = body.route;
+  if (typeof body.model === "string") context.model = body.model;
+  return context;
+}
+
+// ROUTE-001: the ADMITTED Anthropic protocol headers are protocol inputs, not
+// transparent proxy headers. Replay preserves them as case inputs.
+// Only these two names are read; no other request header is
+// captured or forwarded.
+const PROTOCOL_HEADER_NAMES = ["anthropic-version", "anthropic-beta"];
+function protocolHeaders(requestHeaders) {
+  const captured = {};
+  if (!requestHeaders || typeof requestHeaders !== "object") return captured;
+  for (const name of PROTOCOL_HEADER_NAMES) {
+    const value = requestHeaders[name];
+    if (typeof value === "string" && value.length > 0) captured[name] = value;
+  }
+  return captured;
+}
+
 // The FULL assistant message (content + tool_calls + ...) — captured losslessly
-// so tool-calling routes and re-judge lose nothing (Codex #5). /responses-style
-// shapes are wrapped as a message envelope.
+// so tool-calling routes and re-judge lose nothing (Codex #5).
+//
+// SERVE-009: a Responses body keeps its ORDERED output item array and its
+// native status verbatim. Wrapping `output` as one assistant content string
+// lost refusal and item boundaries, so the captured corpus could never
+// authorize function, refusal, reasoning, or strict-output serving.
 function extractMessage(responseJson) {
   if (!responseJson || typeof responseJson !== "object") return { role: "assistant", content: "" };
   const choice = Array.isArray(responseJson.choices) ? responseJson.choices[0] : null;
   if (choice && choice.message && typeof choice.message === "object") return choice.message;
-  if (responseJson.output !== undefined) {
-    const content = typeof responseJson.output === "string" ? responseJson.output : JSON.stringify(responseJson.output);
-    return { role: "assistant", content };
+  if (Array.isArray(responseJson.output)) {
+    return {
+      object: "response",
+      status: typeof responseJson.status === "string" ? responseJson.status : null,
+      output: responseJson.output,
+      incomplete_details: responseJson.incomplete_details == null ? null : responseJson.incomplete_details
+    };
   }
   return { role: "assistant", content: "" };
 }
@@ -427,9 +466,14 @@ async function persistRoute(route) {
   await writeFile(capturePathForRoute(route), JSON.stringify(provenance, null, 2) + "\n");
 }
 
-async function recordCapture(route, input, output, selectedModel, redactions, dependent, endpoint) {
+async function recordCapture(route, input, output, selectedModel, redactions, dependent, endpoint, routing, headers) {
   const map = await loadRoute(route);
-  const id = "case_" + createHash("sha256").update(canonicalJson(input)).digest("hex").slice(0, 16);
+  // ROUTE-001: case identity is the body PLUS the protocol identity it was sent
+  // under. The same body on /v1/chat/completions and /v1/messages, or under two
+  // different admitted Anthropic versions or betas, is TWO evaluated cases; a
+  // body-only hash would collapse distinct replay inputs.
+  const identity = canonicalJson({ input, endpoint: endpoint || "", headers: headers || {} });
+  const id = "case_" + createHash("sha256").update(identity).digest("hex").slice(0, 16);
   const existing = map.get(id);
   if (existing) {
     // Repeated identical input ⇒ accumulate a NEW sample (nondeterminism). The
@@ -437,6 +481,9 @@ async function recordCapture(route, input, output, selectedModel, redactions, de
     existing.samples = Array.isArray(existing.samples) ? existing.samples : [];
     if (!existing.samples.includes(output)) existing.samples.push(output);
     if (selectedModel) existing.selected_model = selectedModel;
+    // The identity above already pins these, so they can only be re-asserted.
+    existing.endpoint = endpoint;
+    existing.headers = headers || {};
     return;
   }
   const messages = Array.isArray(input.messages) ? input.messages : [];
@@ -448,6 +495,9 @@ async function recordCapture(route, input, output, selectedModel, redactions, de
     // endpoint it hit, so tools/response_format and /responses vs /chat are
     // preserved on replay (Codex #6). messages kept for back-compat/display.
     input,
+    routing_context: routing || {},
+    // ROUTE-001: preserve admitted Anthropic headers for faithful replay.
+    headers: headers || {},
     endpoint,
     messages,
     // Structured app-level input + scorer hints: filled by the install agent.
@@ -470,9 +520,9 @@ async function recordCapture(route, input, output, selectedModel, redactions, de
   });
 }
 
-async function forwardOnce(target, method, body) {
+async function forwardOnce(target, method, body, admittedProtocolHeaders) {
   const headers = {
-    authorization: "Bearer " + apiKey,
+    authorization: "Bearer " + (modelRunId && evalCallToken ? evalCallToken : apiKey),
     "content-type": "application/json",
     // Capture-only marker (P0.2): the sidecar ONLY ever runs during local capture,
     // so every call it makes must be excluded from runtime traffic observation —
@@ -481,11 +531,12 @@ async function forwardOnce(target, method, body) {
     // also present (eval traffic already skips observation).
     "x-benchrouter-capture": "1"
   };
-  // Optional eval context: force the planned model with a server-issued call token so
-  // the proxy seeds the per-(request_fingerprint, model) cache during capture.
-  if (modelRunId) headers["x-benchrouter-model-run-id"] = modelRunId;
-  if (modelRunId && evalCallToken) headers["x-benchrouter-eval-call-token"] = evalCallToken;
-  if (modelRunId && forceModel) headers["x-benchrouter-force-model"] = forceModel;
+  // /v1/messages REQUIRES an admitted `anthropic-version`, so a capture that
+  // dropped it could never record a Messages case at all.
+  for (const name of PROTOCOL_HEADER_NAMES) {
+    const value = admittedProtocolHeaders && admittedProtocolHeaders[name];
+    if (typeof value === "string" && value.length > 0) headers[name] = value;
+  }
   const upstream = await fetch(target, { method, headers, body: body && body.length > 0 ? body : undefined });
   const text = await upstream.text();
   return { upstream, text };
@@ -502,10 +553,24 @@ const server = createServer(async (req, res) => {
   }
 
   const endpointPath = req.url || "/v1/chat/completions";
+  const admittedProtocolHeaders = protocolHeaders(req.headers);
   const target = apiUrl + endpointPath;
   const method = req.method || "POST";
   const requestJson = parseJson(body.toString("utf8"));
-  const route = requestJson && typeof requestJson.model === "string" ? requestJson.model : "default";
+  // SERVE-009: capture NEVER records a stream. A streamed body has no single
+  // response object to store as the reference output, so the case would be
+  // captured from a reconstruction rather than from what the provider sent.
+  if (requestJson && requestJson.stream === true) {
+    res.writeHead(400, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "BenchRouter capture does not support streaming responses", code: "capture_stream_unsupported" } }));
+    return;
+  }
+  // ROUTE-001: `route` is the selector. `model` is only the route in the
+  // one-field SDK form, so reading it first would file a `{route, model}` case
+  // under the MODEL's name and split one route's corpus in two.
+  const route = requestJson && typeof requestJson.route === "string" && requestJson.route.length > 0
+    ? requestJson.route
+    : requestJson && typeof requestJson.model === "string" ? requestJson.model : "default";
 
   let first;
   try {
@@ -514,7 +579,7 @@ const server = createServer(async (req, res) => {
     const outputs = [];
     let selectedModel = null;
     for (let i = 0; i < samplesTarget; i += 1) {
-      const result = await forwardOnce(target, method, body);
+      const result = await forwardOnce(target, method, body, admittedProtocolHeaders);
       if (i === 0) first = result;
       selectedModel = result.upstream.headers.get("x-benchrouter-selected-model") || selectedModel;
       const json = parseJson(result.text);
@@ -528,11 +593,12 @@ const server = createServer(async (req, res) => {
       await ensureRouteIndex();
       const redactions = [];
       const redactedInput = redact(normalizeInput(requestJson), "", redactions);
+      const capturedRoutingContext = routingContext(requestJson);
       const dependent = detectDependent(redactedInput);
       for (const sample of outputs) {
         // Redact the message OBJECT (structure-preserving) then store as JSON.
         const redactedOutput = JSON.stringify(redact(sample.message, "reference_output", redactions));
-        await recordCapture(route, redactedInput, redactedOutput, selectedModel, redactions, dependent, endpointPath);
+        await recordCapture(route, redactedInput, redactedOutput, selectedModel, redactions, dependent, endpointPath, capturedRoutingContext, admittedProtocolHeaders);
       }
       await persistRoute(route);
       try {

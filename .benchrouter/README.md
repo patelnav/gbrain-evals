@@ -4,8 +4,10 @@ BenchRouter owns this folder's generated kit for one or more LLM routes in patel
 
 ## What It Does
 
-- Your app calls BenchRouter through OpenAI Chat Completions or native Anthropic Messages, with a route id as the outbound model.
-- BenchRouter serves the current best model for that route and only swaps after evals pass.
+BenchRouter compares models using your route's quality tests. Its Personal Pareto Frontier (PPF) shows cost and quality tradeoffs. The baseline is the comparison floor; the best model is the highest-ranked eligible choice. Fallbacks exist only when other models meet the route's policy gates. BenchRouter does not define your quality standard or invent a missing application-level evaluator.
+
+- Your app calls BenchRouter with a route id as the outbound model, using its supported HTTP protocol.
+- Registration and PR evaluation do not activate production traffic. A default-branch import makes the route eligible to serve its incumbent while discovery continues.
 - GitHub Actions runs each repository executable route's declared evaluator against one forced candidate and reads its declared result.
 - Isolated replay does not run app code. A repository executable route runs only its declared command from a frozen default-branch commit.
 
@@ -29,6 +31,6 @@ BenchRouter owns this folder's generated kit for one or more LLM routes in patel
 
 - npm run benchrouter:calibrate
 - npm run benchrouter:eval
-- npx --yes --package @benchrouter/cli benchrouter doctor --repo patelnav/gbrain-evals
+- npx --yes --package @benchrouter/cli benchrouter doctor --phase evaluation --repo patelnav/gbrain-evals
 
 Use .benchrouter/SETUP_README.md for the repo-specific setup steps.

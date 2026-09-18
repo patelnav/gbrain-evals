@@ -7,7 +7,7 @@ on:
     paths:
       - .benchrouter/**
       - bun.lock
-      - eval/runner/cat26-contextual-retrieval.ts
+      - eval/runner/benchrouter-contextual-synopsis.ts
       - eval/data/cat26-contextual-retrieval/corpus.json
       - eval/data/world-v1/companies__acme-0.json
       - eval/data/world-v1/companies__beta-1.json
@@ -31,7 +31,7 @@ on:
     paths:
       - .benchrouter/**
       - bun.lock
-      - eval/runner/cat26-contextual-retrieval.ts
+      - eval/runner/benchrouter-contextual-synopsis.ts
       - eval/data/cat26-contextual-retrieval/corpus.json
       - eval/data/world-v1/companies__acme-0.json
       - eval/data/world-v1/companies__beta-1.json
@@ -97,7 +97,7 @@ jobs:
     outputs:
       matrix: ${{ steps.routes.outputs.matrix }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -129,7 +129,7 @@ jobs:
       max-parallel: 4
       matrix: ${{ fromJSON(needs.benchrouter-routes.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -186,9 +186,10 @@ jobs:
           BENCHROUTER_OIDC_AUDIENCE: benchrouter
       - name: Setup Node.js
         if: github.event_name == 'workflow_dispatch' || env.BENCHROUTER_PLAN_ACTION == 'run'
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: ${{ env.BENCHROUTER_EVAL_MODE == 'repository_executable' && env.BENCHROUTER_EXEC_RUNTIME == 'node' && env.BENCHROUTER_EXEC_RUNTIME_VERSION || '22' }}
+          package-manager-cache: false
       - name: Setup Bun
         if: (github.event_name == 'workflow_dispatch' || env.BENCHROUTER_PLAN_ACTION == 'run') && env.BENCHROUTER_EVAL_MODE == 'repository_executable' && env.BENCHROUTER_EXEC_RUNTIME == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
@@ -203,7 +204,6 @@ jobs:
         env:
           BENCHROUTER_REPO_FULL_NAME: patelnav/gbrain-evals
           BENCHROUTER_OIDC_AUDIENCE: benchrouter
-          GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
       - name: Run BenchRouter model pack
         if: github.event_name == 'workflow_dispatch'
         run: node .benchrouter/upload-results.mjs run-pack
@@ -213,7 +213,7 @@ jobs:
           GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
       - name: Upload debug artifacts
         if: always() && github.event_name == 'workflow_dispatch' || env.BENCHROUTER_PLAN_ACTION == 'run'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: benchrouter-results-${{ matrix.pack_index || strategy.job-index }}
           include-hidden-files: true
@@ -222,3 +222,4 @@ jobs:
             .benchrouter/fingerprint*.json
             .benchrouter/run-error*.json
             .benchrouter/upload-error*.json
+            .benchrouter/failure*.json

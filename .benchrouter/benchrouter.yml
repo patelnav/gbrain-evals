@@ -10,7 +10,7 @@ routes:
     route_id: "gbrain-evals/contextual-synopsis"
     name: "Contextual Synopsis"
     code_refs:
-      - "eval/runner/cat26-contextual-retrieval.ts"
+      - "eval/runner/benchrouter-contextual-synopsis.ts"
     metadata:
       # TODO: code-consumed | human-read | neither-defensible
       eval_archetype: ""
@@ -29,20 +29,20 @@ routes:
       mode: repository_executable
       api_family: "anthropic_messages"
       runtime: "bun"
-      runtime_version: "1.3.6"
+      runtime_version: "1.3.10"
       lockfile: "bun.lock"
       result_path: ".benchrouter/executable-result.json"
       primary_metric: "mrr"
-      max_model_calls: 24
+      max_model_calls: 30
       max_cost_usd: 2
       max_cost_per_call_usd: 0.25
       timeout_minutes: 45
       argv:
         - "bun"
-        - "eval/runner/cat26-contextual-retrieval.ts"
+        - "eval/runner/benchrouter-contextual-synopsis.ts"
         - "--benchrouter"
       input_refs:
-        - "eval/runner/cat26-contextual-retrieval.ts"
+        - "eval/runner/benchrouter-contextual-synopsis.ts"
         - "eval/data/cat26-contextual-retrieval/corpus.json"
         - "eval/data/world-v1/companies__acme-0.json"
         - "eval/data/world-v1/companies__beta-1.json"
