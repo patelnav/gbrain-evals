@@ -324,7 +324,7 @@ function loadQueries(path: string): QuerySpec[] {
   return raw.queries;
 }
 
-function loadFixture(corpus: CorpusId): LoadedFixture {
+export function loadFixture(corpus: CorpusId): LoadedFixture {
   if (corpus === 'cat26') {
     const { pages, pageRefs } = loadCat26Pages();
     return {
@@ -345,7 +345,7 @@ function loadFixture(corpus: CorpusId): LoadedFixture {
   };
 }
 
-function loadEvalPack(): EvalPack {
+export function loadEvalPack(): EvalPack {
   const raw = JSON.parse(readFileSync(EVAL_PACK_PATH, 'utf8')) as EvalPack;
   if (raw.mode !== 'repository_executable') {
     throw new Error(`${EVAL_PACK_PATH}: mode must be repository_executable`);
@@ -655,11 +655,15 @@ function synopsisFailureDetail(pageSlug: string, kind: string, detail?: string):
   return `gbrain_failure_class=${label}${classification}${direct}${auditText}`;
 }
 
-async function validateFixedInputs(
+/**
+ * Everything --validate checks except chunk measurement, which needs a
+ * PGLite import of the whole corpus.
+ */
+export function validateStaticInputs(
   pack: EvalPack,
   fixture: LoadedFixture,
   benchrouter: boolean,
-): Promise<FixtureStats> {
+): void {
   for (const ref of pack.input_refs) readFileSync(ref, 'utf8');
   for (const ref of pack.acceptance_refs) readFileSync(ref, 'utf8');
   if (pack.case_refs) {
@@ -678,10 +682,28 @@ async function validateFixedInputs(
     }
   }
   validateQueries(fixture);
+  validateSynopsisModelRouting(benchrouter);
+}
+
+/** Chunk measurement plus the invariants and call budget that depend on it. */
+export async function validateChunkBudget(pack: EvalPack, fixture: LoadedFixture): Promise<FixtureStats> {
   const stats = await measureFixtureChunks(fixture.pages);
   validateFixtureInvariants(fixture, stats);
-  validateSynopsisModelRouting(benchrouter);
+  if (stats.totalChunks > pack.max_model_calls) {
+    throw new Error(
+      `fixture needs ${stats.totalChunks} synopsis calls but eval-pack max_model_calls is ${pack.max_model_calls}`,
+    );
+  }
   return stats;
+}
+
+async function validateFixedInputs(
+  pack: EvalPack,
+  fixture: LoadedFixture,
+  benchrouter: boolean,
+): Promise<FixtureStats> {
+  validateStaticInputs(pack, fixture, benchrouter);
+  return validateChunkBudget(pack, fixture);
 }
 
 async function applyContextualReembed(
@@ -902,11 +924,6 @@ async function main(): Promise<void> {
     process.stderr.write(`${tag}   synopsis model: ${resolveSynopsisModel(args.benchrouter)}\n`);
     process.stderr.write(`${tag}   eval-pack: ${EVAL_PACK_PATH}\n`);
     process.stderr.write(`${tag}   primary_metric: ${pack.primary_metric}\n`);
-    if (stats.totalChunks > pack.max_model_calls) {
-      throw new Error(
-        `fixture needs ${stats.totalChunks} synopsis calls but eval-pack max_model_calls is ${pack.max_model_calls}`,
-      );
-    }
     return;
   }
 
@@ -1013,4 +1030,4 @@ async function main(): Promise<void> {
   process.stderr.write(`${tag}   receipt:             ${outFile}\n`);
 }
 
-await main();
+if (import.meta.main) await main();
