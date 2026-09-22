@@ -1,39 +1,50 @@
 /**
- * BrainBench Cat 26 — contextual retrieval modes A/B (v0.40.3.0).
+ * Contextual-synopsis retrieval eval (BenchRouter route
+ * `gbrain-evals/contextual-synopsis`).
  *
- * Headline question: does Anthropic-style contextual retrieval
- * (`title` wrap or `per_chunk_synopsis`) actually improve recall on
- * cross-chunk queries?
+ * Headline question: when gbrain writes a one-sentence synopsis for every
+ * chunk before embedding it (`per_chunk_synopsis`), how much of the required
+ * evidence lands in the top five search results, and which synopsis model
+ * gives that recall at the lowest cost?
  *
- * Fixed corpus selected from the committed world-v1 fixtures.
+ * Corpora:
+ *   - amara-life-v1 (default, and the only BenchRouter corpus): all 424 items
+ *     of the fictional VC inbox in eval/data/amara-life-v1, one gbrain page
+ *     per manifest item. 93 hand-written questions with complete gold labels
+ *     live in eval/data/contextual-synopsis-amara-life/queries.json.
+ *   - cat26 (`--corpus cat26`): the earlier 15-page world-v1 fixture, kept so
+ *     the MRR results recorded against it stay reproducible.
  *
  * Flow:
- *   1. Fixed corpus (15 existing world-v1 pages).
- *   2. Three modes: none, title, per_chunk_synopsis.
- *   3. Grounded queries with gold slugs across people, companies, and meetings.
- *   4. For each (mode, query) measure MRR and Recall@1, Recall@5, and Recall@10.
- *   5. Report mode-vs-mode deltas.
+ *   1. Import the corpus into a fresh in-memory PGLite brain.
+ *   2. Re-embed every page in each requested mode: none, title,
+ *      per_chunk_synopsis.
+ *   3. Run each question through gbrain hybrid search with reranking, query
+ *      expansion, and the search cache pinned off.
+ *   4. Score Recall@1/5/10, strict Recall-all@5, and MRR per question.
  *
  * BenchRouter repository_executable mode (`--benchrouter` or
  * BENCHROUTER_EXEC_RESULT_PATH) runs a fixed title baseline and the routed
- * synopsis candidate:
+ * synopsis candidate on amara-life-v1:
  *   - Synopsis uses gbrain native Anthropic Messages via ANTHROPIC_BASE_URL
  *   - Outbound model is `anthropic:<route-id>` (the server binds the candidate)
  *   - ANTHROPIC_API_KEY is the server-issued ephemeral eval token from the kit
  *   - Embeddings stay on google:gemini-embedding-001 at 1,536 dimensions
  *   - No fetch wrapper, client-forged headers, or echoed model-call IDs
  *   - Synopsis page_fallback fails the eval
- *   - Writes benchrouter.executable_result.v1 to result_path
+ *   - Writes benchrouter.executable_result.v1 to result_path with the
+ *     candidate's Recall@5 as the primary metric
  *
  * Run:
- *   bun eval/runner/benchrouter-contextual-synopsis.ts
- *   bun eval/runner/benchrouter-contextual-synopsis.ts --benchrouter
  *   bun eval/runner/benchrouter-contextual-synopsis.ts --validate
+ *   bun eval/runner/benchrouter-contextual-synopsis.ts --modes none,title
+ *   bun eval/runner/benchrouter-contextual-synopsis.ts --benchrouter
+ *   bun eval/runner/benchrouter-contextual-synopsis.ts --corpus cat26
  */
 
 import { writeFileSync, mkdirSync, readFileSync, readdirSync } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { PGLiteEngine } from 'gbrain/pglite-engine';
 import { importFromContent } from 'gbrain/import-file';
 import { configureGateway } from 'gbrain/ai/gateway';
@@ -41,27 +52,60 @@ import { hybridSearch } from 'gbrain/search/hybrid';
 import { reembedPageWithContextualRetrieval } from '../../node_modules/gbrain/src/core/contextual-retrieval-service.ts';
 import { loadSearchModeConfig, resolveSearchMode } from '../../node_modules/gbrain/src/core/search/mode.ts';
 import { recallAtK, type RankedDoc } from './types.ts';
+import { recallAllAtK } from './metrics.ts';
+import { AMARA_LIFE_MANIFEST, amaraLifeSourceFiles, loadAmaraLifePages } from './amara-life-pages.ts';
 
-const CORPUS_PATH = 'eval/data/cat26-contextual-retrieval/corpus.json';
-const QUERIES_PATH = 'eval/data/cat26-contextual-retrieval/queries.json';
+const CAT26_CORPUS_PATH = 'eval/data/cat26-contextual-retrieval/corpus.json';
+const CAT26_QUERIES_PATH = 'eval/data/cat26-contextual-retrieval/queries.json';
+const AMARA_QUERIES_PATH = 'eval/data/contextual-synopsis-amara-life/queries.json';
+const AMARA_PAGES_MODULE = 'eval/runner/amara-life-pages.ts';
 const EVAL_PACK_PATH = '.benchrouter/contextual-synopsis-eval-pack.json';
 const ROUTE_ID = 'gbrain-evals/contextual-synopsis';
 const INCUMBENT_SYNOPSIS_MODEL = 'anthropic:claude-haiku-4-5-20251001';
 const EMBEDDING_MODEL = 'google:gemini-embedding-001';
 const EMBEDDING_DIM = 1536;
-const PRIMARY_METRIC = 'mrr';
+const PRIMARY_METRIC = 'recall_at_5';
 
-const MIN_PAGES = 12;
-const MIN_QUERIES = 24;
-const MIN_TOTAL_CHUNKS = 15;
-const MIN_CONTEXTUAL_GOLD_PAGES = 12;
-const MIN_MULTICHUNK_GOLD_PAGES = 4;
+type CorpusId = 'amara-life-v1' | 'cat26';
+
+interface FixtureLimits {
+  minPages: number;
+  minQueries: number;
+  minTotalChunks: number;
+  minGoldPages: number;
+  /** Page types that must each supply at least one gold page. */
+  requiredGoldTypes: string[];
+  /**
+   * cat26 was built to exercise cross-chunk context. Every amara-life-v1 item
+   * fits in one chunk, so there the synopsis situates a whole page instead.
+   */
+  minMultichunkGoldPages: number;
+}
+
+const LIMITS: Record<CorpusId, FixtureLimits> = {
+  'amara-life-v1': {
+    minPages: 424,
+    minQueries: 80,
+    minTotalChunks: 424,
+    minGoldPages: 100,
+    requiredGoldTypes: ['email', 'slack', 'calendar-event', 'note', 'meeting', 'source'],
+    minMultichunkGoldPages: 0,
+  },
+  cat26: {
+    minPages: 12,
+    minQueries: 24,
+    minTotalChunks: 15,
+    minGoldPages: 12,
+    requiredGoldTypes: ['person', 'company', 'meeting'],
+    minMultichunkGoldPages: 4,
+  },
+};
 
 interface CorpusPage {
   slug: string;
-  title: string;
-  body: string;
-  type: 'person' | 'company' | 'meeting';
+  /** Markdown handed to importFromContent. */
+  content: string;
+  type: string;
 }
 
 interface CorpusFile {
@@ -78,15 +122,26 @@ interface WorldPage {
   timeline?: string;
 }
 
-interface LoadedCorpus {
+interface LoadedFixture {
+  corpus: CorpusId;
   pages: CorpusPage[];
-  pageRefs: string[];
+  /** Committed files the pages were built from; each must be an eval-pack input_ref. */
+  sourceRefs: string[];
+  queriesPath: string;
+  queries: QuerySpec[];
 }
 
 interface QuerySpec {
   id: string;
   query: string;
   relevant_slugs: string[];
+  /** amara-life-v1 only: single_fact or conflicting_sources. */
+  kind?: string;
+  /**
+   * amara-life-v1 only: case-insensitive substrings. The pages containing all
+   * of them must equal relevant_slugs, which checks label completeness.
+   */
+  evidence?: string[];
 }
 
 interface QueriesFile {
@@ -110,25 +165,41 @@ interface EvalPack {
 
 type Mode = 'none' | 'title' | 'per_chunk_synopsis';
 
+interface QueryResult {
+  id: string;
+  kind?: string;
+  relevant_slugs: string[];
+  top_10: string[];
+  recall_at_1: number;
+  recall_at_5: number;
+  recall_at_10: number;
+  recall_all_at_5: number;
+  mrr: number;
+}
+
 interface ModeResult {
   mode: Mode;
-  per_query_recall_at_1: number[];
-  per_query_recall_at_5: number[];
-  per_query_recall_at_10: number[];
-  per_query_mrr: number[];
+  per_query: QueryResult[];
   mean_recall_at_1: number;
   mean_recall_at_5: number;
   mean_recall_at_10: number;
+  mean_recall_all_at_5: number;
   mean_mrr: number;
+  /** Mean Recall@5 over the questions of each kind (amara-life-v1). */
+  recall_at_5_by_kind: Record<string, number>;
 }
 
 interface Receipt {
-  schema_version: 1;
-  cat: 'cat26-contextual-retrieval';
+  schema_version: 2;
+  cat: 'contextual-synopsis';
+  corpus: CorpusId;
   gbrain_version: string;
   timestamp: string;
   corpus_pages: number;
   queries: number;
+  embedding_model: string;
+  embedding_dimensions: number;
+  synopsis_model: string;
   modes: ModeResult[];
   best_mode: Mode;
   title_vs_none_delta_mrr: number;
@@ -149,6 +220,7 @@ interface ParsedArgs {
   help: boolean;
   validate: boolean;
   benchrouter: boolean;
+  corpus: CorpusId;
   modes: Mode[];
   resultPath?: string;
 }
@@ -163,6 +235,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     help: false,
     validate: false,
     benchrouter: false,
+    corpus: 'amara-life-v1',
     modes: ['none', 'title', 'per_chunk_synopsis'],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -170,6 +243,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (arg === '--help' || arg === '-h') out.help = true;
     else if (arg === '--validate') out.validate = true;
     else if (arg === '--benchrouter') out.benchrouter = true;
+    else if (arg === '--corpus') out.corpus = argv[++i] as CorpusId;
     else if (arg === '--modes') out.modes = argv[++i].split(',').map(s => s.trim()) as Mode[];
     else if (arg === '--result-path') out.resultPath = argv[++i];
   }
@@ -183,17 +257,28 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 function printHelp(): void {
   process.stderr.write(
-    'cat26-contextual-retrieval — fixed-corpus contextual retrieval benchmark\n\n' +
+    'contextual-synopsis — fixed-corpus contextual retrieval benchmark\n\n' +
     'Usage:\n' +
-    '  bun eval/runner/benchrouter-contextual-synopsis.ts [--validate]\n' +
+    '  bun eval/runner/benchrouter-contextual-synopsis.ts [--validate] [--corpus amara-life-v1|cat26]\n' +
     '  bun eval/runner/benchrouter-contextual-synopsis.ts --benchrouter [--result-path PATH]\n' +
     '  bun eval/runner/benchrouter-contextual-synopsis.ts --modes none,title\n\n' +
     'Flags:\n' +
-    '  --validate       Check corpus, queries, eval-pack, and chunk invariants (no network)\n' +
-    '  --benchrouter    BenchRouter repository_executable mode (title baseline + synopsis candidate)\n' +
+    '  --validate       Check corpus, queries, labels, eval-pack, and chunk invariants (no network)\n' +
+    '  --benchrouter    BenchRouter repository_executable mode on amara-life-v1\n' +
+    '                   (title baseline + synopsis candidate)\n' +
+    '  --corpus         amara-life-v1 (default) or cat26 (earlier 15-page fixture)\n' +
     '  --result-path    Override benchrouter.executable_result.v1 output path\n' +
     '  --modes          Comma-separated modes (default: none,title,per_chunk_synopsis)\n',
   );
+}
+
+function validateCorpusArg(args: ParsedArgs): void {
+  if (args.corpus !== 'amara-life-v1' && args.corpus !== 'cat26') {
+    throw new Error(`unknown --corpus ${String(args.corpus)} (expected amara-life-v1 or cat26)`);
+  }
+  if (args.benchrouter && args.corpus !== 'amara-life-v1') {
+    throw new Error('--benchrouter runs the eval-pack corpus, amara-life-v1; drop --corpus cat26');
+  }
 }
 
 function validateModeList(modes: Mode[]): void {
@@ -205,10 +290,10 @@ function validateModeList(modes: Mode[]): void {
   }
 }
 
-function loadCorpus(): LoadedCorpus {
-  const raw = JSON.parse(readFileSync(CORPUS_PATH, 'utf8')) as CorpusFile;
+function loadCat26Pages(): { pages: CorpusPage[]; pageRefs: string[] } {
+  const raw = JSON.parse(readFileSync(CAT26_CORPUS_PATH, 'utf8')) as CorpusFile;
   if (raw.source !== 'world-v1' || !Array.isArray(raw.page_refs) || raw.page_refs.length === 0) {
-    throw new Error(`${CORPUS_PATH}: expected a non-empty world-v1 page_refs array`);
+    throw new Error(`${CAT26_CORPUS_PATH}: expected a non-empty world-v1 page_refs array`);
   }
   const pages = raw.page_refs.map((ref): CorpusPage => {
     const page = JSON.parse(readFileSync(ref, 'utf8')) as WorldPage;
@@ -219,24 +304,45 @@ function loadCorpus(): LoadedCorpus {
       throw new Error(`${ref}: expected a person, company, or meeting fixture (got ${String(page.type)})`);
     }
     const timeline = page.timeline?.trim();
+    const body = timeline
+      ? `${page.compiled_truth}\n\n## Timeline\n\n${timeline}`
+      : page.compiled_truth;
     return {
       slug: page.slug,
-      title: page.title,
       type: page.type,
-      body: timeline
-        ? `${page.compiled_truth}\n\n## Timeline\n\n${timeline}`
-        : page.compiled_truth,
+      content: `# ${page.title}\n\n${body}\n`,
     };
   });
   return { pages, pageRefs: raw.page_refs };
 }
 
-function loadQueries(): QuerySpec[] {
-  const raw = JSON.parse(readFileSync(QUERIES_PATH, 'utf8')) as QueriesFile;
+function loadQueries(path: string): QuerySpec[] {
+  const raw = JSON.parse(readFileSync(path, 'utf8')) as QueriesFile;
   if (!Array.isArray(raw.queries) || raw.queries.length === 0) {
-    throw new Error(`${QUERIES_PATH}: missing queries array`);
+    throw new Error(`${path}: missing queries array`);
   }
   return raw.queries;
+}
+
+function loadFixture(corpus: CorpusId): LoadedFixture {
+  if (corpus === 'cat26') {
+    const { pages, pageRefs } = loadCat26Pages();
+    return {
+      corpus,
+      pages,
+      sourceRefs: [CAT26_CORPUS_PATH, ...pageRefs],
+      queriesPath: CAT26_QUERIES_PATH,
+      queries: loadQueries(CAT26_QUERIES_PATH),
+    };
+  }
+  const amaraPages = loadAmaraLifePages();
+  return {
+    corpus,
+    pages: amaraPages.map(p => ({ slug: p.slug, type: p.type, content: p.content })),
+    sourceRefs: [AMARA_PAGES_MODULE, AMARA_LIFE_MANIFEST, ...amaraLifeSourceFiles(amaraPages)],
+    queriesPath: AMARA_QUERIES_PATH,
+    queries: loadQueries(AMARA_QUERIES_PATH),
+  };
 }
 
 function loadEvalPack(): EvalPack {
@@ -321,8 +427,7 @@ async function importFixturePages(
   const perPageChunks: Record<string, number> = {};
   let totalChunks = 0;
   for (const page of pages) {
-    const body = `# ${page.title}\n\n${page.body}\n`;
-    const imported = await importFromContent(engine, page.slug, body, { noEmbed: opts.noEmbed });
+    const imported = await importFromContent(engine, page.slug, page.content, { noEmbed: opts.noEmbed });
     if (imported.status !== 'imported') {
       throw new Error(
         `fixture import failed for ${page.slug}: ${imported.status}${imported.error ? ` (${imported.error})` : ''}`,
@@ -389,7 +494,8 @@ function validateEvalPackContract(pack: EvalPack): void {
   if (pack.lockfile) readFileSync(pack.lockfile, 'utf8');
 }
 
-function validateQueries(queries: QuerySpec[], pages: CorpusPage[]): void {
+function validateQueries(fixture: LoadedFixture): void {
+  const { queries, pages } = fixture;
   const slugs = new Set(pages.map(p => p.slug));
   const ids = new Set<string>();
   for (const q of queries) {
@@ -405,32 +511,65 @@ function validateQueries(queries: QuerySpec[], pages: CorpusPage[]): void {
         throw new Error(`query ${q.id} references unknown slug: ${slug}`);
       }
     }
+    if (fixture.corpus === 'amara-life-v1') validateEvidenceLabels(q, pages);
   }
 }
 
-function validateFixtureInvariants(pages: CorpusPage[], queries: QuerySpec[], stats: FixtureStats): void {
-  if (pages.length < MIN_PAGES) {
-    throw new Error(`corpus must have at least ${MIN_PAGES} pages (got ${pages.length})`);
+/**
+ * Label completeness for amara-life-v1: the pages containing every evidence
+ * substring must be exactly the labelled pages. An unlabelled page that
+ * states the same fact, or a label on a page that does not, fails the check.
+ */
+function validateEvidenceLabels(q: QuerySpec, pages: CorpusPage[]): void {
+  if (q.kind !== 'single_fact' && q.kind !== 'conflicting_sources') {
+    throw new Error(`query ${q.id} kind must be single_fact or conflicting_sources`);
   }
-  if (queries.length < MIN_QUERIES) {
-    throw new Error(`queries must have at least ${MIN_QUERIES} entries (got ${queries.length})`);
+  if (!Array.isArray(q.evidence) || q.evidence.length === 0 || q.evidence.some(e => !e.trim())) {
+    throw new Error(`query ${q.id} requires non-empty evidence substrings`);
   }
-  if (stats.totalChunks < MIN_TOTAL_CHUNKS) {
-    throw new Error(`corpus must produce at least ${MIN_TOTAL_CHUNKS} chunks (got ${stats.totalChunks})`);
+  const needles = q.evidence.map(e => e.toLowerCase());
+  const matching = pages
+    .filter(page => {
+      const text = page.content.toLowerCase();
+      return needles.every(needle => text.includes(needle));
+    })
+    .map(page => page.slug);
+  const gold = new Set(q.relevant_slugs);
+  const unlabelled = matching.filter(slug => !gold.has(slug));
+  const unsupported = q.relevant_slugs.filter(slug => !matching.includes(slug));
+  if (unlabelled.length > 0 || unsupported.length > 0) {
+    throw new Error(
+      `query ${q.id} labels disagree with its evidence: ` +
+      `unlabelled matches [${unlabelled.join(', ')}], labels without evidence [${unsupported.join(', ')}]`,
+    );
+  }
+}
+
+function validateFixtureInvariants(fixture: LoadedFixture, stats: FixtureStats): void {
+  const { pages, queries } = fixture;
+  const limits = LIMITS[fixture.corpus];
+  if (pages.length < limits.minPages) {
+    throw new Error(`corpus must have at least ${limits.minPages} pages (got ${pages.length})`);
+  }
+  if (queries.length < limits.minQueries) {
+    throw new Error(`queries must have at least ${limits.minQueries} entries (got ${queries.length})`);
+  }
+  if (stats.totalChunks < limits.minTotalChunks) {
+    throw new Error(`corpus must produce at least ${limits.minTotalChunks} chunks (got ${stats.totalChunks})`);
   }
   if (pages.length <= 10) {
     throw new Error(`Recall@10 needs more than ten competing pages (got ${pages.length})`);
   }
   const goldPages = new Set(queries.flatMap(query => query.relevant_slugs));
-  if (goldPages.size < MIN_CONTEXTUAL_GOLD_PAGES) {
+  if (goldPages.size < limits.minGoldPages) {
     throw new Error(
-      `contextual retrieval needs at least ${MIN_CONTEXTUAL_GOLD_PAGES} unique gold pages (got ${goldPages.size})`,
+      `contextual retrieval needs at least ${limits.minGoldPages} unique gold pages (got ${goldPages.size})`,
     );
   }
   const goldTypes = new Set(
     pages.filter((page) => goldPages.has(page.slug)).map((page) => page.type),
   );
-  for (const requiredType of ['person', 'company', 'meeting'] as const) {
+  for (const requiredType of limits.requiredGoldTypes) {
     if (!goldTypes.has(requiredType)) {
       throw new Error(`queries must include a gold page of type ${requiredType}`);
     }
@@ -438,9 +577,9 @@ function validateFixtureInvariants(pages: CorpusPage[], queries: QuerySpec[], st
   const multichunkGoldPages = [...goldPages].filter(
     (slug) => (stats.perPageChunks[slug] ?? 0) >= 2,
   );
-  if (multichunkGoldPages.length < MIN_MULTICHUNK_GOLD_PAGES) {
+  if (multichunkGoldPages.length < limits.minMultichunkGoldPages) {
     throw new Error(
-      `contextual retrieval needs at least ${MIN_MULTICHUNK_GOLD_PAGES} multi-chunk gold pages ` +
+      `contextual retrieval needs at least ${limits.minMultichunkGoldPages} multi-chunk gold pages ` +
       `(got ${multichunkGoldPages.length})`,
     );
   }
@@ -518,9 +657,7 @@ function synopsisFailureDetail(pageSlug: string, kind: string, detail?: string):
 
 async function validateFixedInputs(
   pack: EvalPack,
-  pages: CorpusPage[],
-  pageRefs: string[],
-  queries: QuerySpec[],
+  fixture: LoadedFixture,
   benchrouter: boolean,
 ): Promise<FixtureStats> {
   for (const ref of pack.input_refs) readFileSync(ref, 'utf8');
@@ -529,14 +666,20 @@ async function validateFixedInputs(
     for (const ref of pack.case_refs) readFileSync(ref, 'utf8');
   }
   validateEvalPackContract(pack);
-  for (const ref of pageRefs) {
-    if (!pack.input_refs.includes(ref)) {
-      throw new Error(`eval-pack input_refs must include corpus page ${ref}`);
+  // The eval pack declares amara-life-v1; cat26 is a local-only corpus.
+  if (fixture.corpus === 'amara-life-v1') {
+    for (const ref of fixture.sourceRefs) {
+      if (!pack.input_refs.includes(ref)) {
+        throw new Error(`eval-pack input_refs must include corpus source ${ref}`);
+      }
+    }
+    if (!pack.acceptance_refs.includes(fixture.queriesPath)) {
+      throw new Error(`eval-pack acceptance_refs must include ${fixture.queriesPath}`);
     }
   }
-  validateQueries(queries, pages);
-  const stats = await measureFixtureChunks(pages);
-  validateFixtureInvariants(pages, queries, stats);
+  validateQueries(fixture);
+  const stats = await measureFixtureChunks(fixture.pages);
+  validateFixtureInvariants(fixture, stats);
   validateSynopsisModelRouting(benchrouter);
   return stats;
 }
@@ -634,30 +777,38 @@ async function runMode(
       );
     }
 
-    const perQ1: number[] = [];
-    const perQ5: number[] = [];
-    const perQ10: number[] = [];
-    const perQmrr: number[] = [];
+    const perQuery: QueryResult[] = [];
     for (const q of queries) {
       const results = await hybridSearch(engine, q.query, { limit: 30 } as any);
       const docs = toRankedDocs(results as Array<{ slug: string; score?: number }>).slice(0, 10);
+      const ids = docs.map(doc => doc.page_id);
       const rel = new Set(q.relevant_slugs);
-      perQ1.push(recallAtK(docs, rel, 1));
-      perQ5.push(recallAtK(docs, rel, 5));
-      perQ10.push(recallAtK(docs, rel, 10));
-      perQmrr.push(reciprocalRank(docs, rel));
+      perQuery.push({
+        id: q.id,
+        ...(q.kind ? { kind: q.kind } : {}),
+        relevant_slugs: q.relevant_slugs,
+        top_10: ids,
+        recall_at_1: recallAtK(docs, rel, 1),
+        recall_at_5: recallAtK(docs, rel, 5),
+        recall_at_10: recallAtK(docs, rel, 10),
+        recall_all_at_5: recallAllAtK(ids, rel, 5),
+        mrr: reciprocalRank(docs, rel),
+      });
     }
 
+    const byKind: Record<string, number> = {};
+    for (const kind of new Set(perQuery.flatMap(r => (r.kind ? [r.kind] : [])))) {
+      byKind[kind] = mean(perQuery.filter(r => r.kind === kind).map(r => r.recall_at_5));
+    }
     return {
       mode,
-      per_query_recall_at_1: perQ1,
-      per_query_recall_at_5: perQ5,
-      per_query_recall_at_10: perQ10,
-      per_query_mrr: perQmrr,
-      mean_recall_at_1: mean(perQ1),
-      mean_recall_at_5: mean(perQ5),
-      mean_recall_at_10: mean(perQ10),
-      mean_mrr: mean(perQmrr),
+      per_query: perQuery,
+      mean_recall_at_1: mean(perQuery.map(r => r.recall_at_1)),
+      mean_recall_at_5: mean(perQuery.map(r => r.recall_at_5)),
+      mean_recall_at_10: mean(perQuery.map(r => r.recall_at_10)),
+      mean_recall_all_at_5: mean(perQuery.map(r => r.recall_all_at_5)),
+      mean_mrr: mean(perQuery.map(r => r.mrr)),
+      recall_at_5_by_kind: byKind,
     };
   } finally {
     console.log = origLog;
@@ -665,37 +816,63 @@ async function runMode(
   }
 }
 
+function pct(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
 function writeBenchRouterResult(
   resultPath: string,
   baseline: ModeResult,
   synopsis: ModeResult,
 ): void {
-  const mrrLift = synopsis.mean_mrr - baseline.mean_mrr;
-  mkdirSync(join(process.cwd(), '.benchrouter'), { recursive: true });
+  mkdirSync(dirname(resultPath), { recursive: true });
+  const metrics: Record<string, number> = {
+    candidate_recall_at_5: synopsis.mean_recall_at_5,
+    candidate_recall_all_at_5: synopsis.mean_recall_all_at_5,
+    candidate_recall_at_1: synopsis.mean_recall_at_1,
+    candidate_recall_at_10: synopsis.mean_recall_at_10,
+    candidate_mrr: synopsis.mean_mrr,
+    baseline_recall_at_5: baseline.mean_recall_at_5,
+    baseline_recall_all_at_5: baseline.mean_recall_all_at_5,
+    baseline_recall_at_1: baseline.mean_recall_at_1,
+    baseline_recall_at_10: baseline.mean_recall_at_10,
+    baseline_mrr: baseline.mean_mrr,
+  };
+  for (const [kind, value] of Object.entries(synopsis.recall_at_5_by_kind)) {
+    metrics[`candidate_recall_at_5_${kind}`] = value;
+  }
+  for (const [kind, value] of Object.entries(baseline.recall_at_5_by_kind)) {
+    metrics[`baseline_recall_at_5_${kind}`] = value;
+  }
   const payload: BenchRouterExecutableResult = {
     schema_version: 'benchrouter.executable_result.v1',
     primary_metric: {
       name: PRIMARY_METRIC,
-      score: synopsis.mean_mrr,
+      score: synopsis.mean_recall_at_5,
     },
-    metrics: {
-      candidate_mrr: synopsis.mean_mrr,
-      baseline_mrr: baseline.mean_mrr,
-      candidate_recall_at_1: synopsis.mean_recall_at_1,
-      candidate_recall_at_5: synopsis.mean_recall_at_5,
-      candidate_recall_at_10: synopsis.mean_recall_at_10,
-      baseline_recall_at_1: baseline.mean_recall_at_1,
-      baseline_recall_at_5: baseline.mean_recall_at_5,
-      baseline_recall_at_10: baseline.mean_recall_at_10,
-    },
+    metrics,
   };
   writeFileSync(resultPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
-  process.stderr.write(`[cat26] benchrouter result: ${resultPath}\n`);
-  process.stderr.write(`[cat26]   candidate_mrr=${(synopsis.mean_mrr * 100).toFixed(1)}%\n`);
-  process.stderr.write(`[cat26]   baseline_mrr=${(baseline.mean_mrr * 100).toFixed(1)}%\n`);
-  process.stderr.write(`[cat26]   signed_mrr_lift=${(mrrLift * 100).toFixed(1)} points\n`);
-  process.stderr.write(`[cat26]   candidate_recall_at_5=${(synopsis.mean_recall_at_5 * 100).toFixed(1)}%\n`);
-  process.stderr.write(`[cat26]   candidate_recall_at_10=${(synopsis.mean_recall_at_10 * 100).toFixed(1)}%\n`);
+  const lift = synopsis.mean_recall_at_5 - baseline.mean_recall_at_5;
+  process.stderr.write(`[contextual-synopsis] benchrouter result: ${resultPath}\n`);
+  process.stderr.write(`[contextual-synopsis]   candidate_recall_at_5=${pct(synopsis.mean_recall_at_5)}\n`);
+  process.stderr.write(`[contextual-synopsis]   baseline_recall_at_5=${pct(baseline.mean_recall_at_5)}\n`);
+  process.stderr.write(`[contextual-synopsis]   signed_recall_at_5_lift=${(lift * 100).toFixed(1)} points\n`);
+  process.stderr.write(`[contextual-synopsis]   candidate_recall_all_at_5=${pct(synopsis.mean_recall_all_at_5)}\n`);
+  process.stderr.write(`[contextual-synopsis]   candidate_mrr=${pct(synopsis.mean_mrr)}\n`);
+}
+
+/**
+ * Per-question lines for the CI log, so a BenchRouter run keeps which
+ * questions each mode missed even though only the scalar result is uploaded.
+ */
+function logPerQuery(result: ModeResult): void {
+  for (const r of result.per_query) {
+    process.stderr.write(
+      `[contextual-synopsis]   ${result.mode} ${r.id} R@5=${r.recall_at_5.toFixed(2)} ` +
+      `top5=${r.top_10.slice(0, 5).join(',')}\n`,
+    );
+  }
 }
 
 async function main(): Promise<void> {
@@ -704,25 +881,27 @@ async function main(): Promise<void> {
     printHelp();
     return;
   }
+  validateCorpusArg(args);
 
-  const corpus = loadCorpus();
-  const pages = corpus.pages;
-  const queries = loadQueries();
+  const fixture = loadFixture(args.corpus);
+  const { pages, queries } = fixture;
   const pack = loadEvalPack();
   validateModeList(args.modes);
+  const tag = `[contextual-synopsis:${fixture.corpus}]`;
 
   if (args.validate) {
-    const stats = await validateFixedInputs(pack, pages, corpus.pageRefs, queries, args.benchrouter);
-    process.stderr.write('[cat26] validate ok\n');
-    process.stderr.write(`[cat26]   corpus pages: ${pages.length}\n`);
-    process.stderr.write(`[cat26]   queries: ${queries.length}\n`);
-    process.stderr.write(`[cat26]   total chunks: ${stats.totalChunks}\n`);
-    process.stderr.write(`[cat26]   modes: ${args.modes.join(',')}\n`);
-    process.stderr.write(`[cat26]   expected synopsis calls: ${stats.totalChunks}\n`);
-    process.stderr.write(`[cat26]   eval-pack max_model_calls: ${pack.max_model_calls}\n`);
-    process.stderr.write(`[cat26]   synopsis model: ${resolveSynopsisModel(args.benchrouter)}\n`);
-    process.stderr.write(`[cat26]   eval-pack: ${EVAL_PACK_PATH}\n`);
-    process.stderr.write(`[cat26]   primary_metric: ${pack.primary_metric}\n`);
+    const stats = await validateFixedInputs(pack, fixture, args.benchrouter);
+    const goldPages = new Set(queries.flatMap(q => q.relevant_slugs));
+    process.stderr.write(`${tag} validate ok\n`);
+    process.stderr.write(`${tag}   corpus pages: ${pages.length}\n`);
+    process.stderr.write(`${tag}   queries: ${queries.length} (${goldPages.size} unique gold pages)\n`);
+    process.stderr.write(`${tag}   total chunks: ${stats.totalChunks}\n`);
+    process.stderr.write(`${tag}   modes: ${args.modes.join(',')}\n`);
+    process.stderr.write(`${tag}   expected synopsis calls: ${stats.totalChunks}\n`);
+    process.stderr.write(`${tag}   eval-pack max_model_calls: ${pack.max_model_calls}\n`);
+    process.stderr.write(`${tag}   synopsis model: ${resolveSynopsisModel(args.benchrouter)}\n`);
+    process.stderr.write(`${tag}   eval-pack: ${EVAL_PACK_PATH}\n`);
+    process.stderr.write(`${tag}   primary_metric: ${pack.primary_metric}\n`);
     if (stats.totalChunks > pack.max_model_calls) {
       throw new Error(
         `fixture needs ${stats.totalChunks} synopsis calls but eval-pack max_model_calls is ${pack.max_model_calls}`,
@@ -732,8 +911,8 @@ async function main(): Promise<void> {
   }
 
   const fixtureStats = await measureFixtureChunks(pages);
-  validateQueries(queries, pages);
-  validateFixtureInvariants(pages, queries, fixtureStats);
+  validateQueries(fixture);
+  validateFixtureInvariants(fixture, fixtureStats);
   if (fixtureStats.totalChunks > pack.max_model_calls) {
     throw new Error(
       `fixture needs ${fixtureStats.totalChunks} synopsis calls but eval-pack max_model_calls is ${pack.max_model_calls}`,
@@ -744,19 +923,22 @@ async function main(): Promise<void> {
     ? (['title', 'per_chunk_synopsis'] as Mode[])
     : args.modes;
   process.stderr.write(
-    `[cat26] testing ${pages.length} pages × ${queries.length} queries × ${modes.length} mode(s)...\n`,
+    `${tag} testing ${pages.length} pages × ${queries.length} queries × ${modes.length} mode(s)...\n`,
   );
 
   const results: ModeResult[] = [];
   for (const mode of modes) {
-    process.stderr.write(`[cat26]   mode=${mode}...\n`);
+    const started = Date.now();
+    process.stderr.write(`${tag}   mode=${mode}...\n`);
     const r = await runMode(mode, pages, queries, args.benchrouter && mode === 'per_chunk_synopsis');
     results.push(r);
     process.stderr.write(
-      `[cat26]   mode=${mode} mean MRR=${(r.mean_mrr * 100).toFixed(1)}% ` +
-      `R@1=${(r.mean_recall_at_1 * 100).toFixed(1)}% ` +
-      `R@5=${(r.mean_recall_at_5 * 100).toFixed(1)}% ` +
-      `R@10=${(r.mean_recall_at_10 * 100).toFixed(1)}%\n`,
+      `${tag}   mode=${mode} R@5=${pct(r.mean_recall_at_5)} ` +
+      `R-all@5=${pct(r.mean_recall_all_at_5)} ` +
+      `R@1=${pct(r.mean_recall_at_1)} ` +
+      `R@10=${pct(r.mean_recall_at_10)} ` +
+      `MRR=${pct(r.mean_mrr)} ` +
+      `(${((Date.now() - started) / 1000).toFixed(0)}s)\n`,
     );
   }
 
@@ -765,6 +947,8 @@ async function main(): Promise<void> {
     const synopsis = results.find(r => r.mode === 'per_chunk_synopsis');
     if (!baseline) throw new Error('benchrouter mode requires title baseline result');
     if (!synopsis) throw new Error('benchrouter mode requires per_chunk_synopsis result');
+    logPerQuery(baseline);
+    logPerQuery(synopsis);
     const resultPath = args.resultPath ?? pack.result_path;
     writeBenchRouterResult(resultPath, baseline, synopsis);
     return;
@@ -777,19 +961,23 @@ async function main(): Promise<void> {
   } catch { /* best-effort */ }
 
   const bestMode = results.reduce((a, b) =>
-    a.mean_mrr >= b.mean_mrr ? a : b,
+    a.mean_recall_at_5 >= b.mean_recall_at_5 ? a : b,
   ).mode;
   const noneR = results.find(r => r.mode === 'none');
   const titleR = results.find(r => r.mode === 'title');
   const synR = results.find(r => r.mode === 'per_chunk_synopsis');
 
   const receipt: Receipt = {
-    schema_version: 1,
-    cat: 'cat26-contextual-retrieval',
+    schema_version: 2,
+    cat: 'contextual-synopsis',
+    corpus: fixture.corpus,
     gbrain_version: gbrainVersion,
     timestamp: new Date().toISOString(),
     corpus_pages: pages.length,
     queries: queries.length,
+    embedding_model: EMBEDDING_MODEL,
+    embedding_dimensions: EMBEDDING_DIM,
+    synopsis_model: resolveSynopsisModel(false),
     modes: results,
     best_mode: bestMode,
     title_vs_none_delta_mrr: (titleR?.mean_mrr ?? 0) - (noneR?.mean_mrr ?? 0),
@@ -800,23 +988,29 @@ async function main(): Promise<void> {
     none_vs_synopsis_delta_at_10: (synR?.mean_recall_at_10 ?? 0) - (noneR?.mean_recall_at_10 ?? 0),
   };
 
-  const outDir = join(process.cwd(), 'eval/reports/cat26-contextual-retrieval');
+  const outDir = join(process.cwd(), 'eval/reports/contextual-synopsis');
   mkdirSync(outDir, { recursive: true });
-  const outFile = join(outDir, `${new Date().toISOString().slice(0, 10)}-cat26.json`);
+  const outFile = join(
+    outDir,
+    `${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}-${fixture.corpus}-${modes.join('+')}.json`,
+  );
   writeFileSync(outFile, JSON.stringify(receipt, null, 2) + '\n', 'utf8');
 
-  process.stderr.write('\n[cat26] ─── Scorecard ───────────────────\n');
+  process.stderr.write(`\n${tag} ─── Scorecard ───────────────────\n`);
   for (const r of results) {
     process.stderr.write(
-      `[cat26]   mode=${r.mode.padEnd(22)} ` +
-      `MRR=${(r.mean_mrr * 100).toFixed(1)}% ` +
-      `R@1=${(r.mean_recall_at_1 * 100).toFixed(1)}% ` +
-      `R@5=${(r.mean_recall_at_5 * 100).toFixed(1)}% ` +
-      `R@10=${(r.mean_recall_at_10 * 100).toFixed(1)}%\n`,
+      `${tag}   mode=${r.mode.padEnd(22)} ` +
+      `R@5=${pct(r.mean_recall_at_5)} ` +
+      `R-all@5=${pct(r.mean_recall_all_at_5)} ` +
+      `R@1=${pct(r.mean_recall_at_1)} ` +
+      `R@10=${pct(r.mean_recall_at_10)} ` +
+      `MRR=${pct(r.mean_mrr)}` +
+      Object.entries(r.recall_at_5_by_kind).map(([k, v]) => ` R@5[${k}]=${pct(v)}`).join('') +
+      '\n',
     );
   }
-  process.stderr.write(`[cat26]   best mode:           ${bestMode}\n`);
-  process.stderr.write(`[cat26]   receipt:             ${outFile}\n`);
+  process.stderr.write(`${tag}   best mode (R@5):     ${bestMode}\n`);
+  process.stderr.write(`${tag}   receipt:             ${outFile}\n`);
 }
 
 await main();
