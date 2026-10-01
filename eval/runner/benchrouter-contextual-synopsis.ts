@@ -366,7 +366,7 @@ let benchRouterRoutingInstalled = false;
  * token is used as the normal SDK API key, so the server owns route and call
  * attribution without a client-side fetch or response-header shim.
  */
-function installBenchRouterSynopsisRouting(): void {
+export function installBenchRouterSynopsisRouting(): void {
   if (benchRouterRoutingInstalled) return;
 
   const evalBaseRaw = process.env.BENCHROUTER_EVAL_BASE_URL?.trim();
@@ -376,9 +376,11 @@ function installBenchRouterSynopsisRouting(): void {
   const evalBaseUrl = normalizeAnthropicBaseUrl(evalBaseRaw);
   process.env.ANTHROPIC_BASE_URL = evalBaseUrl;
   const evalToken = process.env.BENCHROUTER_API_KEY?.trim();
-  if (!evalToken || !evalToken.startsWith('ecall_')) {
+  // RUN-001 / AUTH-010: the runtime injects an opaque item call token.
+  // The server validates its authority; the evaluator only requires presence.
+  if (!evalToken) {
     throw new Error(
-      'BenchRouter mode requires the server-issued ecall_ token in BENCHROUTER_API_KEY',
+      'BenchRouter mode requires the runtime-issued call token in BENCHROUTER_API_KEY',
     );
   }
   process.env.ANTHROPIC_API_KEY = evalToken;
@@ -389,7 +391,7 @@ function installBenchRouterSynopsisRouting(): void {
  * Outbound synopsis model for BenchRouter: Anthropic transport + route id body.
  * Candidate identity is bound by the server-issued eval token.
  */
-function resolveSynopsisModel(benchrouter: boolean): string {
+export function resolveSynopsisModel(benchrouter: boolean): string {
   if (benchrouter) {
     return `anthropic:${ROUTE_ID}`;
   }

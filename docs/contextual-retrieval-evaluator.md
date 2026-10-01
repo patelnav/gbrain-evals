@@ -74,7 +74,7 @@ the only variable between candidates.
 `--benchrouter` runs `title` as a fixed baseline and `per_chunk_synopsis` as
 the candidate. Only synopsis calls go through
 `anthropic:gbrain-evals/contextual-synopsis`: `ANTHROPIC_BASE_URL` is set to the
-eval base and `ANTHROPIC_API_KEY` to the kit's server-issued `ecall_` token from
+eval base and `ANTHROPIC_API_KEY` to the runtime's opaque item call token from
 `BENCHROUTER_API_KEY`. The evaluator does not install a fetch wrapper, forge
 routing headers or echo model-call IDs. BenchRouter derives the call ledger and
 cost on its side.
