@@ -30,8 +30,8 @@
     "eval:generate-transcript-distill": "bun eval/generators/transcript-distill-gen.ts",
     "eval:generate-transcript-distill:dry": "bun eval/generators/transcript-distill-gen.ts --dry-run",
     "eval:contextual-synopsis": "bun eval/runner/benchrouter-contextual-synopsis.ts --benchrouter",
-    "benchrouter:eval": "node .benchrouter/benchrouter-eval.mjs",
-    "benchrouter:calibrate": "node .benchrouter/benchrouter-calibrate.mjs"
+    "benchrouter:eval": "node .benchrouter/bootstrap.mjs run",
+    "benchrouter:calibrate": "node .benchrouter/bootstrap.mjs calibrate"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.122.0",

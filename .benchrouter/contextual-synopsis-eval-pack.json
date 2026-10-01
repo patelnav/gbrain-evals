@@ -5,7 +5,7 @@
   "config_path": ".benchrouter/benchrouter.yml",
   "workflow": ".github/workflows/benchrouter-evals.yml",
   "command": "bun run eval:contextual-synopsis",
-  "scorer": ".benchrouter/scorer.contextual-synopsis.js",
+  "scorer": "eval/runner/benchrouter-contextual-synopsis.ts",
   "result_schema": "benchrouter.executable_result.v1",
   "case_refs": [
     "eval/data/contextual-synopsis-amara-life/queries.json"
