@@ -38,3 +38,8 @@ BenchRouter compares models using your route's quality tests. Its Personal Paret
 - npx --yes --package @benchrouter/cli benchrouter doctor --phase evaluation --repo patelnav/gbrain-evals
 
 Use .benchrouter/SETUP_README.md for the repo-specific setup steps.
+
+## Native staging
+
+A default-branch push imports this kit through the signed runtime.
+Workflow activation and evaluation admission remain separate operator steps.
