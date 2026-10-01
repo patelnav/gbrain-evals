@@ -1,7 +1,7 @@
 {
   "name": "gbrain-evals",
   "version": "0.8.0",
-  "description": "BrainBench — public benchmark for personal knowledge agent stacks. Consumes gbrain as a library.",
+  "description": "BrainBench \u2014 public benchmark for personal knowledge agent stacks. Consumes gbrain as a library.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -31,7 +31,8 @@
     "eval:generate-transcript-distill:dry": "bun eval/generators/transcript-distill-gen.ts --dry-run",
     "eval:contextual-synopsis": "bun eval/runner/benchrouter-contextual-synopsis.ts --benchrouter",
     "benchrouter:eval": "node .benchrouter/bootstrap.mjs run",
-    "benchrouter:calibrate": "node .benchrouter/bootstrap.mjs calibrate"
+    "benchrouter:calibrate": "node .benchrouter/bootstrap.mjs calibrate",
+    "benchrouter:capture": "node .benchrouter/bootstrap.mjs capture"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.122.0",
