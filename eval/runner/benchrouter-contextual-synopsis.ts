@@ -42,7 +42,7 @@
  *   bun eval/runner/benchrouter-contextual-synopsis.ts --corpus cat26
  */
 
-import { writeFileSync, mkdirSync, readFileSync, readdirSync } from 'fs';
+import { writeFileSync, mkdirSync, readFileSync, readdirSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, join } from 'path';
 import { PGLiteEngine } from 'gbrain/pglite-engine';
@@ -603,7 +603,25 @@ function validateSynopsisModelRouting(benchrouter: boolean): void {
  * the latest matching events so a transport failure remains diagnosable while
  * the evaluator keeps contract validity separate from retrieval quality.
  */
-function readSynopsisAuditDetail(pageSlug: string): string {
+export function captureSynopsisAuditCursor(): Map<string, number> | null {
+  const auditDir = process.env.GBRAIN_AUDIT_DIR?.trim() || join(homedir(), '.gbrain', 'audit');
+  const cursor = new Map<string, number>();
+  let files: string[];
+  try { files = readdirSync(auditDir); }
+  catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? cursor : null;
+  }
+  try {
+    for (const name of files) {
+      if (name.startsWith('synopsis-failures-') && name.endsWith('.jsonl')) {
+        cursor.set(name, statSync(join(auditDir, name)).size);
+      }
+    }
+  } catch { return null; }
+  return cursor;
+}
+
+export function readSynopsisAuditDetail(pageSlug: string, cursor?: Map<string, number>): string {
   const auditDir = process.env.GBRAIN_AUDIT_DIR?.trim() || join(homedir(), '.gbrain', 'audit');
   let files: string[];
   try {
@@ -618,7 +636,8 @@ function readSynopsisAuditDetail(pageSlug: string): string {
   for (const file of files) {
     let lines: string[];
     try {
-      lines = readFileSync(join(auditDir, file), 'utf8').split('\n');
+      const bytes = readFileSync(join(auditDir, file));
+      lines = bytes.subarray(cursor?.get(file) ?? 0).toString('utf8').split('\n');
     } catch {
       continue;
     }
@@ -642,6 +661,32 @@ function readSynopsisAuditDetail(pageSlug: string): string {
     }
   }
   return events.slice(-3).join(' | ');
+}
+
+export function synopsisAuditReportsTruncation(detail: string): boolean {
+  return /(?:^| \| )chunk=\d+ malformed: stop_reason=length(?: |$)/.test(detail);
+}
+
+async function declareBenchRouterOutputRejection(): Promise<void> {
+  const baseUrl = process.env.BENCHROUTER_EVAL_BASE_URL?.trim();
+  const token = process.env.BENCHROUTER_API_KEY?.trim();
+  if (!baseUrl || !token) return;
+  try {
+    // EVAL-011 / EVAL-015: the server verifies its own last model call and
+    // current lease. No model, call ID, score, or audit text is asserted here.
+    const response = await fetch(new URL('/v1/eval/output-rejection', baseUrl), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'user-agent': 'codex-research/1.0' },
+      body: JSON.stringify({ code: 'output_cut_off' }),
+      signal: AbortSignal.timeout(10_000),
+      redirect: 'error',
+    });
+    process.stderr.write(`[contextual-synopsis] output rejection declaration: HTTP ${response.status}\n`);
+    await response.body?.cancel();
+  } catch {
+    // An unavailable declaration does not hide or replace the original failure.
+    process.stderr.write('[contextual-synopsis] output rejection declaration unavailable\n');
+  }
 }
 
 function synopsisFailureDetail(pageSlug: string, kind: string, detail?: string): string {
@@ -716,6 +761,7 @@ async function applyContextualReembed(
   benchrouter: boolean,
 ): Promise<void> {
   for (const page of pages) {
+    const auditCursor = benchrouter ? captureSynopsisAuditCursor() : undefined;
     const result = await reembedPageWithContextualRetrieval({
       engine,
       pageSlug: page.slug,
@@ -730,6 +776,10 @@ async function applyContextualReembed(
       );
     }
     if (result.kind === 'page_fallback') {
+      if (benchrouter && auditCursor && result.fallback_kind === 'malformed' &&
+          synopsisAuditReportsTruncation(readSynopsisAuditDetail(page.slug, auditCursor))) {
+        await declareBenchRouterOutputRejection();
+      }
       throw new Error(
         `synopsis re-embed contract/transport fallback for ${page.slug}: ` +
         `${result.mode_attempted} -> ${result.mode_applied} ` +
