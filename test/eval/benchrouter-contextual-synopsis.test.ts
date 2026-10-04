@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { logSynopsisFailure } from '../../node_modules/gbrain/src/core/audit-synopsis.ts';
 import {
   installBenchRouterSynopsisRouting,
   resolveSynopsisModel,
@@ -6,9 +10,36 @@ import {
   loadFixture,
   validateChunkBudget,
   validateStaticInputs,
+  captureSynopsisAuditCursor,
+  readSynopsisAuditDetail,
+  synopsisAuditReportsTruncation,
 } from '../../eval/runner/benchrouter-contextual-synopsis.ts';
 
 describe('BenchRouter contextual synopsis fixture validation', () => {
+  test('only a fresh gbrain truncation audit can declare rejected output', () => {
+    const auditDir = mkdtempSync(join(tmpdir(), 'synopsis-audit-proof-'));
+    const previous = process.env.GBRAIN_AUDIT_DIR;
+    process.env.GBRAIN_AUDIT_DIR = auditDir;
+    const emit = (detail: string) => logSynopsisFailure({ pageSlug: 'proof/page', sourceId: 'default', chunkIndex: 0,
+      kind: 'malformed', detail, pageLevelFallback: true });
+    try {
+      emit('stop_reason=length (maxTokens=200 exhausted; raise models.synopsis_max_tokens)');
+      const cursor = captureSynopsisAuditCursor();
+      if (!cursor) throw new Error('Expected readable audit cursor');
+      expect(synopsisAuditReportsTruncation(readSynopsisAuditDetail('proof/page', cursor))).toBe(false);
+      emit('The upstream model rejected this request.');
+      expect(synopsisAuditReportsTruncation(readSynopsisAuditDetail('proof/page', cursor))).toBe(false);
+      const current = captureSynopsisAuditCursor();
+      if (!current) throw new Error('Expected readable audit cursor');
+      emit('stop_reason=length (maxTokens=200 exhausted; raise models.synopsis_max_tokens)');
+      expect(synopsisAuditReportsTruncation(readSynopsisAuditDetail('proof/page', current))).toBe(true);
+      expect(synopsisAuditReportsTruncation(readSynopsisAuditDetail('other/page', current))).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.GBRAIN_AUDIT_DIR;
+      else process.env.GBRAIN_AUDIT_DIR = previous;
+      rmSync(auditDir, { recursive: true, force: true });
+    }
+  });
   test('amara-life-v1 eval pack, input refs, and label completeness validate offline', () => {
     const pack = loadEvalPack();
     const fixture = loadFixture('amara-life-v1');

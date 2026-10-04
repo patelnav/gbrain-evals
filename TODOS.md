@@ -32,6 +32,13 @@ The [August 31 audit](docs/audit/2026-08-31-eval-audit.md) explains the finding 
 
 ## Integration maintenance
 
+- [ ] **Restore contextual-synopsis evaluation after truncated model replies** (2026-10-04).
+  The evaluator rejected replies cut off at its unchanged 200-token limit. Its process exit
+  counted toward BenchRouter's harness block. The explicit output-rejection declaration is
+  prepared. Server deployment, this repository's production import and bounded recovery
+  remain pending. Keep the failed runs, 424-page corpus, 93 questions, Recall@5 scorer and
+  declared call and cost limits unchanged.
+
 - [ ] **Bring Cat35 missing-prerequisite receipts into the common contract** (WS0). The recorded issue is that missing `OPENAI_API_KEY` exits 2 without a skipped receipt. Add a skip reason and the common acknowledgment behavior so `all.ts` does not need its exit-code fallback. The original note recorded 135 passing tests and preflight checks at v0.47.6.0; that is not a new verification.
 
 - [ ] **Retire or repair the historical shootout wrapper** (WS7). The wrapper still refuses reranker cells and Phase 2 lacks its driver. Newer gbrain experiments provide configuration controls, so the old task “add any search-config surface” is no longer an accurate description of all upstream capability. Decide how to update the wrapper against a tested CLI and supported providers before re-enabling cells. See [its operating notes](scripts/RUNBOOK_SHOOTOUT.md).
