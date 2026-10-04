@@ -32,16 +32,23 @@ The [August 31 audit](docs/audit/2026-08-31-eval-audit.md) explains the finding 
 
 ## Integration maintenance
 
-- [ ] **Restore contextual-synopsis evaluation after truncated model replies** (2026-10-04).
-  The evaluator rejected replies cut off at its unchanged 200-token limit. Its process exit
-  counted toward BenchRouter's harness block. [BenchRouter #346](https://github.com/BenchRouter/benchrouter/pull/346)
-  deployed the explicit output-rejection declaration, and [#12](https://github.com/patelnav/gbrain-evals/pull/12)
-  imported production source `040d5029ddc1e0eb67e340555f4cd67e44bc3b64`. Luna job `37185049146`
-  declared its truncation with HTTP 200 and preserved its original failure. At 07:19 UTC,
-  three model failures left the route unblocked and compatible models running. Existing
-  serving evidence remains valid. Fresh successful scores and complete eight-model recovery
-  are still pending. Keep the failed runs, 424-page corpus, 93 questions, Recall@5 scorer and
-  declared call and cost limits unchanged.
+- [x] **Repair contextual-synopsis truncated-output attribution** (2026-10-04).
+  [BenchRouter #346](https://github.com/BenchRouter/benchrouter/pull/346) deployed the
+  declaration, and [#12](https://github.com/patelnav/gbrain-evals/pull/12) imported source
+  `040d5029ddc1e0eb67e340555f4cd67e44bc3b64`. Luna job `37185049146` and Nex job `37185401149`
+  declared truncation with HTTP 200 and preserved their failures without blocking the route.
+  Fresh Recall@5: Tencent 91.94% (`37185045174`), Mistral 90.32% (`37185171224`),
+  Haiku 87.63% (`37185046562`). [BenchRouter #348](https://github.com/BenchRouter/benchrouter/pull/348)
+  also deployed the fixed per-call refusal repair after independent review and green CI.
+  Keep all failures, the 424-page corpus, 93 questions, scorer and declared limits unchanged.
+
+- [ ] **Verify final contextual-synopsis recovery settlement** (2026-10-04).
+  The old server queued Muse retry attempt 12 before the fixed-cap repair deployed. It is
+  due around 10:15 UTC. The last account read showed valid serving evidence and no route
+  block, with three uploaded scores and one queued member. Verify its settlement and
+  result-set closure. Five distinct candidates failed; this is partial model coverage,
+  not an all-model pass. BenchRouter's native model-call ledger recorded $0.41836 for this
+  recovery; external Google embedding charges remain unreconciled.
 
 - [ ] **Bring Cat35 missing-prerequisite receipts into the common contract** (WS0). The recorded issue is that missing `OPENAI_API_KEY` exits 2 without a skipped receipt. Add a skip reason and the common acknowledgment behavior so `all.ts` does not need its exit-code fallback. The original note recorded 135 passing tests and preflight checks at v0.47.6.0; that is not a new verification.
 
